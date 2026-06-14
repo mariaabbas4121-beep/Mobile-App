@@ -1,0 +1,59 @@
+{
+  "expo": {
+    "name": "NeighborShare",
+    "slug": "neighborshare",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.avif",
+    "userInterfaceStyle": "light",
+    "scheme": "neighborshare",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0F172A"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.neighborshare.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "NeighborShare needs your location to show nearby items.",
+        "NSCameraUsageDescription": "NeighborShare uses the camera to scan QR codes.",
+        "NSPhotoLibraryUsageDescription": "NeighborShare lets you pick photos for item listings."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#0F172A"
+      },
+      "package": "com.neighborshare.app",
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "CAMERA"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/icon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Show current location on map."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow NeighborShare to access your camera."
+        }
+      ],
+      "expo-font"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
