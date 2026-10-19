@@ -210,7 +210,7 @@ const styles = StyleSheet.create({
   imageWrap: { position: 'relative' },
   cardImage: { width: '100%', height: 130 },
   unavailableOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(27,94,32,0.6)', // Green translucent overlay for unavailable
     alignItems: 'center', justifyContent: 'center',
   },

@@ -14,70 +14,29 @@ import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import Toast from "react-native-toast-message";
-import { useApp } from "../../context/AppContext";
-import { createUserWithEmailAndPassword } from "firebase/auth";
-import { doc, setDoc } from "firebase/firestore";
-import { auth, db } from "../../utils/firebase";
-import { serverTimestamp } from "firebase/firestore";
 import { Colors, Typography, Spacing, Radii, Shadows } from "../../utils/theme";
 
 export default function SignupScreen() {
   const router = useRouter();
-  const { login } = useApp();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
 
-  const handleSignup = async () => {
-  if (!name || !email || !password) {
-    Toast.show({ type: "error", text1: "Please fill required fields" });
-    return;
-  }
+  const handleSignup = () => {
+    if (!name || !email || !password) {
+      Toast.show({ type: "error", text1: "Please fill required fields" });
+      return;
+    }
 
-  setLoading(true);
-
-  try {
-    // 1. Create user in Firebase Auth
-    const userCredential = await createUserWithEmailAndPassword(
-      auth,
-      email,
-      password
-    );
-
-    const user = userCredential.user;
-
-    // 2. Save extra data in Firestore
-    await setDoc(doc(db, "users", user.uid), {
-      name: name,
-      email: email,
-      phone: phone,
-      createdAt: serverTimestamp(),
-    });
-
-    setLoading(false);
-
+    // TODO(Phase 1): create the account through the API
+    // (POST /api/auth/signup). Until then no account is created.
     Toast.show({
-      type: "success",
-      text1: "🎉 Welcome to NeighborShare!",
+      type: "info",
+      text1: "Account creation is not available yet",
+      text2: "Account sign-up is being added in the next phase.",
     });
-
-    // 3. Login context (your existing system)
-    login();
-
-    // optional: go to home
-  router.replace("/(tabs)");
-
-  } catch (error: any) {
-    setLoading(false);
-
-    Toast.show({
-      type: "error",
-      text1: error.message,
-    });
-  }
-};
+  };
 
   return (
     <View style={styles.container}>
@@ -186,7 +145,6 @@ export default function SignupScreen() {
                 style={styles.btnPrimary}
                 onPress={handleSignup}
                 activeOpacity={0.85}
-                disabled={loading}
               >
                 {/* Green Gradient Button */}
                 <LinearGradient
@@ -198,9 +156,7 @@ export default function SignupScreen() {
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 0 }}
                 >
-                  <Text style={styles.btnText}>
-                    {loading ? "Creating account…" : "Create Account"}
-                  </Text>
+                  <Text style={styles.btnText}>Create Account</Text>
                 </LinearGradient>
               </TouchableOpacity>
             </View>

@@ -1,167 +1,63 @@
-# Course
+# NeighborShare
 
-Project Name : NeighborShare
-Platform : React Native (Expo Router)
-Backend : Firebase Authentication & Cloud Firestore
-Course : Mobile Application Development
-Submitted By : Maria Abbas (2023-ag-9845)
+NeighborShare is a mobile app for borrowing and lending items within trusted local communities such as universities, hostels and housing societies.
 
-OVERVIEW
+The repository contains two independent applications:
 
-NeighborShare is a community-based mobile application that allows users to lend and borrow items within their neighborhood. The application helps users share resources efficiently by providing item listings, borrowing requests, lending management, location-based item discovery, activity tracking, and secure user authentication.
+| Folder | What it is | Stack |
+| --- | --- | --- |
+| [`frontend/`](frontend) | Mobile app | React Native, Expo SDK 57, Expo Router, TypeScript |
+| [`backend/`](backend) | REST API | Node.js 22, Express, Supabase JS client |
 
-The application includes:
+Supabase is the backend platform: Supabase Auth for accounts, PostgreSQL with Row-Level Security for data, and Supabase Storage for files. **The mobile app talks only to the Express API**; the API handles authentication and every Supabase operation on the server, and holds all Supabase keys. The app has no Supabase client or keys. A Python research module (scikit-learn, SHAP) is planned for a later phase.
 
-• User Registration and Login
-• Browse Available Items
-• Item Details View
-• Add New Items for Lending
-• Map-Based Item Discovery
-• Activity Tracking
-• User Profile Management
-• Secure Authentication using Firebase
+## Current status
 
-PREREQUISITES
+- The app runs on in-memory mock data. Sign-in and sign-up screens are in place but not yet connected to Supabase Auth.
+- The API serves a health check and is ready to connect to Supabase; it has no feature endpoints yet.
+- Neither app needs a Supabase project to start locally.
 
-• Node.js (v18 or later)
-• npm
-• Expo CLI
-• Firebase Account
-• Android Studio Emulator OR Expo Go Application
+## Running locally
 
-SETUP STEPS
+Each app has its own dependencies. Run them in separate terminals.
 
-STEP 1 — Clone the Repository 
-GITHUB REPOSITORY
-
-git clone https://github.com/mariaabbas4121-beep/Mobile-App
-
-cd NeighborShare
-
-STEP 2 — Install Dependencies
-
+```powershell
+# Frontend
+cd frontend
 npm install
+npx expo start -c
+```
 
-STEP 3 — Configure Firebase
+```powershell
+# Backend
+cd backend
+npm install
+npm run dev
+```
 
-Open Firebase Console
-Create a Firebase Project named NeighborShare
+Check the API at http://localhost:4000/health.
 
-Enable:
+In PowerShell, use `npm.cmd` and `npx.cmd` if the execution policy blocks `npm.ps1`.
 
-• Firebase Authentication (Email/Password)
+## Environment files
 
-• Cloud Firestore Database
+Each app has a `.env.example` template. To create your local copy, run this inside `frontend/` or `backend/`:
 
-Create a Web App
-Copy Firebase Configuration
+```powershell
+Copy-Item .env.example .env
+```
 
-Open:
+The values in the templates are placeholders, not real credentials; see each app's README for what to fill in. Real `.env` files are ignored by Git and must never be committed.
 
-firebase/config.ts
+- `frontend/.env` holds only `EXPO_PUBLIC_API_URL`, the address of the API. On a physical phone this must be your computer's LAN IP (e.g. `http://192.168.1.20:4000`), not `localhost`.
+- `backend/.env` holds all Supabase configuration. No Supabase key ever goes in the frontend or in any `EXPO_PUBLIC_*` variable.
 
-Replace with your Firebase credentials:
+## Documentation
 
-const firebaseConfig = {
-apiKey: "YOUR_API_KEY",
-authDomain: "YOUR_PROJECT.firebaseapp.com",
-projectId: "YOUR_PROJECT_ID",
-storageBucket: "YOUR_PROJECT.appspot.com",
-messagingSenderId: "YOUR_SENDER_ID",
-appId: "YOUR_APP_ID"
-};
+- [frontend/README.md](frontend/README.md): screens, routes, folder guide, app setup
+- [backend/README.md](backend/README.md): endpoints, environment variables, Supabase access rules
 
-STEP 4 — Start Application
+## Course information
 
-npx expo start
-
-Then choose:
-
-• Press W → Open Web Version
-
-• Press A → Android Emulator
-
-• Scan QR Code using Expo Go
-
-FIRESTORE DATABASE COLLECTIONS
-
-Users Collection
-
-• User ID
-
-• Full Name
-
-• Email Address
-
-• Profile Information
-
-
-
-
-PROJECT STRUCTURE
-
-NeighborShare/
-
-├── app/
-
-│ ├── auth/
-
-│ │ ├── welcome.tsx
-
-│ │ ├── login.tsx
-
-│ │ └── signup.tsx
-
-│ │
-
-│ ├── (tabs)/
-
-│ │ ├── index.tsx
-
-│ │ ├── map.tsx
-
-│ │ ├── activity.tsx
-
-│ │ └── profile.tsx
-
-│ │
-
-│ ├── item/
-
-│ │ └── [id].tsx
-
-│ │
-
-│ └── lend/
-
-│ └── new.tsx
-
-│
-
-├── components/
-
-│ └── CustomButton.tsx
-
-│
-
-├── context/
-
-│ └── AppContext.tsx
-
-│
-
-├── utils/
-
-│ ├── theme.ts
-
-│ └── helpers.ts
-
-│
-
-├── assets/
-
-├── firebase/
-
-├── package.json
-
-└── README.txt
+- **Course:** Mobile Application Development
+- **Submitted by:** Maria Abbas (2023-ag-9845)

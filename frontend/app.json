@@ -4,13 +4,10 @@
     "slug": "neighborshare",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.avif",
+    "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "scheme": "neighborshare",
-    "splash": {
-      "resizeMode": "contain",
-      "backgroundColor": "#0F172A"
-    },
+    
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.neighborshare.app",
@@ -45,12 +42,21 @@
         }
       ],
       [
+       "expo-splash-screen",
+    {
+     "resizeMode": "contain",
+      "backgroundColor": "#0F172A"
+    }
+  ],
+      [
         "expo-camera",
         {
           "cameraPermission": "Allow NeighborShare to access your camera."
         }
       ],
-      "expo-font"
+      "expo-font",
+      "expo-status-bar",
+      "expo-splash-screen"
     ],
     "experiments": {
       "typedRoutes": true
