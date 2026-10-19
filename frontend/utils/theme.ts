@@ -22,6 +22,10 @@ export const Colors = {
   sagePale: '#D1FAE5',
   sageDark: '#059669',
 
+  // Green aliases used by existing screens; keep their established colors.
+  green: '#2E7D32',
+  greenDark: '#1B5E20',
+
   // Borrow — sky blue for active borrows
   sky: '#0EA5E9',
   skyPale: '#E0F2FE',

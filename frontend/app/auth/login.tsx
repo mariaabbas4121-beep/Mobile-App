@@ -15,8 +15,6 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import Toast from "react-native-toast-message";
 import { useApp } from "../../context/AppContext";
-import { signInWithEmailAndPassword } from "firebase/auth";
-import { auth } from "../../utils/firebase";
 import { Colors, Typography, Spacing, Radii, Shadows } from "../../utils/theme";
 
 export default function LoginScreen() {
@@ -26,9 +24,8 @@ export default function LoginScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPass, setShowPass] = useState(false);
-  const [loading, setLoading] = useState(false);
 
-  const handleLogin = async () => {
+  const handleLogin = () => {
     if (!email || !password) {
       Toast.show({
         type: "error",
@@ -37,32 +34,20 @@ export default function LoginScreen() {
       return;
     }
 
-    setLoading(true);
+    // TODO(Phase 1): sign in through the API (POST /api/auth/login). Until
+    // then no account is checked and the user is not signed in.
+    Toast.show({
+      type: "info",
+      text1: "Sign-in is not available yet",
+      text2: "Account sign-in is being added in the next phase.",
+    });
+  };
 
-    try {
-      // 🔥 Firebase login
-      await signInWithEmailAndPassword(auth, email, password);
-
-      Toast.show({
-        type: "success",
-        text1: "Welcome back 👋",
-      });
-
-      // update app state
-      login();
-
-      // go to app
-      router.replace("/(tabs)");
-
-    } catch (error: any) {
-      Toast.show({
-        type: "error",
-        text1: error.message,
-      });
-
-    } finally {
-      setLoading(false);
-    }
+  // Development only: open the app with the local mock data. This is not a
+  // sign-in; no credentials are checked and nothing is sent to a server.
+  const exploreDemo = () => {
+    login();
+    router.replace("/(tabs)");
   };
 
   return (
@@ -152,16 +137,13 @@ export default function LoginScreen() {
               {/* Button */}
               <TouchableOpacity
                 onPress={handleLogin}
-                disabled={loading}
                 style={styles.btnPrimary}
               >
                 <LinearGradient
                   colors={["#2e7d32", "#1b5e20"]}
                   style={styles.btnGrad}
                 >
-                  <Text style={styles.btnText}>
-                    {loading ? "Signing in..." : "Sign In"}
-                  </Text>
+                  <Text style={styles.btnText}>Sign In</Text>
                 </LinearGradient>
               </TouchableOpacity>
 
@@ -174,6 +156,14 @@ export default function LoginScreen() {
                 <Text style={styles.signupLink}>Sign up</Text>
               </TouchableOpacity>
             </View>
+
+            {__DEV__ && (
+              <TouchableOpacity onPress={exploreDemo} style={styles.demoRow}>
+                <Text style={styles.demoText}>
+                  Development: explore with mock data
+                </Text>
+              </TouchableOpacity>
+            )}
 
           </ScrollView>
         </KeyboardAvoidingView>
@@ -231,4 +221,6 @@ const styles = StyleSheet.create({
   },
   signupText: { color: "#666" },
   signupLink: { color: "#2e7d32", fontWeight: "bold" },
+  demoRow: { alignItems: "center", marginTop: 16 },
+  demoText: { color: "#666", textDecorationLine: "underline" },
 });

@@ -1,0 +1,7 @@
+# Shared rules (node_modules, .env files, logs) live in ../.gitignore.
+# Repeated here so the backend stays safe if it is ever copied out alone.
+node_modules/
+.env
+.env.*
+!.env.example
+coverage/

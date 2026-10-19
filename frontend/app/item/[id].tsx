@@ -231,7 +231,7 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.offWhite },
   imageContainer: { position: 'relative', height: height * 0.42 },
   heroImage: { width: '100%', height: '100%' },
-  imageOverlay: { ...StyleSheet.absoluteFillObject },
+  imageOverlay: { ...StyleSheet.absoluteFill },
   backWrap: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: Spacing.xl },
   backBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(15,23,42,0.5)', alignItems: 'center', justifyContent: 'center' },
   shareBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(15,23,42,0.5)', alignItems: 'center', justifyContent: 'center' },
