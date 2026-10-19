@@ -57,7 +57,4 @@ The values in the templates are placeholders, not real credentials; see each app
 - [frontend/README.md](frontend/README.md): screens, routes, folder guide, app setup
 - [backend/README.md](backend/README.md): endpoints, environment variables, Supabase access rules
 
-## Course information
 
-- **Course:** Mobile Application Development
-- **Submitted by:** Maria Abbas (2023-ag-9845)
