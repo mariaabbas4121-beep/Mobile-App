@@ -57,5 +57,12 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, req, res, _next)
   };
   if (error.details !== undefined) body.details = error.details;
 
-  if (!res.headersSent) res.status(error.status).json(body);
+  if (res.headersSent) return;
+  if (error.status === 401) {
+    res.setHeader(
+      'WWW-Authenticate',
+      error.code === 'UNAUTHENTICATED' ? 'Bearer' : 'Bearer error="invalid_token"',
+    );
+  }
+  res.status(error.status).json(body);
 };

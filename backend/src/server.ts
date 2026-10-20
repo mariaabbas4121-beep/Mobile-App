@@ -2,6 +2,9 @@ import dotenv from 'dotenv';
 import { createApp } from './app.js';
 import { ConfigValidationError, loadConfig, type Config } from './config/env.js';
 import { createLogger } from './lib/logger.js';
+import { createSupabaseClients } from './config/supabase.js';
+import { createSupabaseAuthGateway } from './auth/supabase-auth.gateway.js';
+import { createSupabaseProfileRepository } from './auth/supabase-profile.repository.js';
 
 // Load .env only in the entry point, so tests decide their own environment.
 // Existing process variables take precedence over the file.
@@ -20,7 +23,13 @@ try {
 }
 
 const logger = createLogger(config);
-const app = createApp({ config, logger });
+const supabase = createSupabaseClients(config);
+const app = createApp({
+  config,
+  logger,
+  authGateway: createSupabaseAuthGateway(supabase, config, logger),
+  profiles: createSupabaseProfileRepository(supabase, logger),
+});
 
 const server = app.listen(config.port, () => {
   logger.info({ port: config.port, env: config.nodeEnv }, 'NeighborShare API listening');

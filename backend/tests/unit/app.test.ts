@@ -1,9 +1,8 @@
 import { describe, expect, test } from 'vitest';
 import request from 'supertest';
-import { createApp } from '../../src/app.js';
-import { testConfig, silentLogger } from '../helpers.js';
+import { testApp } from '../helpers.js';
 
-const app = createApp({ config: testConfig(), logger: silentLogger });
+const { app } = testApp();
 
 describe('health', () => {
   for (const path of ['/health', '/api/v1/health']) {

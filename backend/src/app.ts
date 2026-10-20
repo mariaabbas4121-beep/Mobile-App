@@ -5,15 +5,19 @@ import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
 import type { Config } from './config/env.js';
 import type { Logger } from './lib/logger.js';
+import type { AuthGateway, ProfileRepository } from './auth/auth.types.js';
 import { healthRoutes } from './routes/health.routes.js';
+import { authRoutes } from './routes/auth.routes.js';
 import { errorHandler, notFound } from './middleware/error.middleware.js';
 
 export interface AppDeps {
   config: Config;
   logger: Logger;
+  authGateway: AuthGateway;
+  profiles: ProfileRepository;
 }
 
-export function createApp({ config, logger }: AppDeps) {
+export function createApp({ config, logger, authGateway, profiles }: AppDeps) {
   const app = express();
 
   app.disable('x-powered-by');
@@ -72,6 +76,7 @@ export function createApp({ config, logger }: AppDeps) {
 
   app.use('/health', healthRoutes());
   app.use('/api/v1/health', healthRoutes());
+  app.use('/api/v1/auth', authRoutes({ gateway: authGateway, profiles }));
 
   app.use(notFound);
   app.use(errorHandler);
