@@ -11,6 +11,16 @@ export default defineConfig({
         },
       },
       {
+        // Migrations on PGlite (in-process PostgreSQL) with a Supabase stub.
+        test: {
+          name: 'db',
+          include: ['tests/db/**/*.test.ts'],
+          environment: 'node',
+          testTimeout: 30_000,
+          hookTimeout: 60_000,
+        },
+      },
+      {
         // Runs against a real Supabase project. Never point it at production.
         test: {
           name: 'integration',
