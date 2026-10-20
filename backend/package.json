@@ -23,7 +23,8 @@
     "db:migrations": "supabase migration list --linked",
     "db:push:dry": "supabase db push --linked --dry-run",
     "db:push": "supabase db push --linked",
-    "db:new": "supabase migration new"
+    "db:new": "supabase migration new",
+    "test:all": "npm run typecheck && vitest run"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",

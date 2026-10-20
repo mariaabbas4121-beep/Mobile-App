@@ -28,14 +28,46 @@ export function toAuthSession(session: Session): AuthSession {
   };
 }
 
+// auth-js retries some calls (notably refreshSession) with backoff for up to
+// ~30 s when Supabase is unreachable. The API gives up sooner and reports 503.
+export const AUTH_OPERATION_DEADLINE_MS = 12_000;
+
+function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(AppError.unavailable('Authentication service is temporarily unavailable', 'AUTH_UNAVAILABLE')),
+      ms,
+    );
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
 // Supabase returns an error object rather than throwing for API failures;
 // both paths are normalised to AppError here.
 export function createSupabaseAuthGateway(
   clients: SupabaseClients,
   config: Pick<Config, 'auth'>,
   logger: Logger,
+  options: { deadlineMs?: number } = {},
 ): AuthGateway {
-  const auth = () => clients.anon().auth;
+  const deadlineMs = options.deadlineMs ?? AUTH_OPERATION_DEADLINE_MS;
+  const rawAuth = () => clients.anon().auth;
+  // Every auth-js call goes through the deadline.
+  const auth = () => {
+    const a = rawAuth();
+    return {
+      signUp: (...args: Parameters<typeof a.signUp>) => withDeadline(a.signUp(...args), deadlineMs),
+      signInWithPassword: (...args: Parameters<typeof a.signInWithPassword>) =>
+        withDeadline(a.signInWithPassword(...args), deadlineMs),
+      refreshSession: (...args: Parameters<typeof a.refreshSession>) => withDeadline(a.refreshSession(...args), deadlineMs),
+      resend: (...args: Parameters<typeof a.resend>) => withDeadline(a.resend(...args), deadlineMs),
+      getUser: (...args: Parameters<typeof a.getUser>) => withDeadline(a.getUser(...args), deadlineMs),
+      admin: {
+        signOut: (...args: Parameters<typeof a.admin.signOut>) => withDeadline(a.admin.signOut(...args), deadlineMs),
+      },
+    };
+  };
 
   const sessionResult = (data: { user: User | null; session: Session | null }, operation: 'login' | 'refresh') => {
     if (!data.user || !data.session) {
