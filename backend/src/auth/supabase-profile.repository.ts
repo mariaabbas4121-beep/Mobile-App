@@ -1,7 +1,16 @@
 import type { SupabaseClients } from '../config/supabase.js';
 import type { Logger } from '../lib/logger.js';
 import { AppError } from '../lib/errors.js';
-import type { Profile, ProfileRepository, Verification } from './auth.types.js';
+import type { Profile, ProfileRepository, ProfileUpdate, Verification } from './auth.types.js';
+
+// API field -> column. Only these can be written by a user; the database's
+// column grants enforce the same list independently.
+const UPDATABLE_COLUMNS: Record<keyof ProfileUpdate, string> = {
+  displayName: 'display_name',
+  city: 'city',
+  neighborhood: 'neighborhood',
+  bio: 'bio',
+};
 
 const PROFILE_COLUMNS =
   'id, display_name, city, neighborhood, bio, avatar_path, phone_verified_at, profile_completed_at, account_status, created_at, updated_at';
@@ -79,6 +88,27 @@ export function createSupabaseProfileRepository(clients: SupabaseClients, logger
         .returns<VerificationRow[]>();
       if (error) throw fail('get_verifications', error);
       return (data ?? []).map(toVerification);
+    },
+
+    async updateProfile(accessToken, userId, changes) {
+      const row: Record<string, string | null> = {};
+      for (const [field, column] of Object.entries(UPDATABLE_COLUMNS)) {
+        const value = changes[field as keyof ProfileUpdate];
+        if (value !== undefined) row[column] = value;
+      }
+      const { data, error } = await clients
+        .forUser(accessToken)
+        .from('profiles')
+        .update(row)
+        .eq('id', userId)
+        .select(PROFILE_COLUMNS)
+        .maybeSingle<ProfileRow>();
+      if (error) {
+        if (error.code === '42501') throw AppError.forbidden();
+        if (error.code === '23514') throw AppError.badRequest('INVALID_PROFILE', 'Profile values are not accepted');
+        throw fail('update_profile', error);
+      }
+      return data ? toProfile(data) : null;
     },
   };
 }

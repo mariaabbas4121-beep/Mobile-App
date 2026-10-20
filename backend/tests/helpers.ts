@@ -3,6 +3,7 @@ import type { Config } from '../src/config/env.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createApp } from '../src/app.js';
 import { AppError } from '../src/lib/errors.js';
+import type { RateLimitPolicy } from '../src/middleware/rate-limit.middleware.js';
 import type {
   AuthGateway,
   AuthSession,
@@ -98,7 +99,7 @@ export function fakeGateway(): { [K in keyof AuthGateway]: ReturnType<typeof vi.
     refresh: vi.fn<AuthGateway['refresh']>(async () => ({ user: userA, session })),
     resendSignupConfirmation: vi.fn<AuthGateway['resendSignupConfirmation']>(async () => undefined),
     getUser: vi.fn<AuthGateway['getUser']>(async (token) => {
-      if (token === VALID_TOKEN) return userA;
+      if (token === VALID_TOKEN) return { user: userA, roles: [] };
       throw AppError.unauthenticated('Access token is invalid or expired', 'INVALID_TOKEN');
     }),
     signOut: vi.fn<AuthGateway['signOut']>(async () => undefined),
@@ -111,10 +112,17 @@ export function fakeProfiles(): { [K in keyof ProfileRepository]: ReturnType<typ
       userId === userA.id ? profileFor(userA) : null,
     ),
     getVerifications: vi.fn<ProfileRepository['getVerifications']>(async () => verificationsFor()),
+    updateProfile: vi.fn<ProfileRepository['updateProfile']>(async (_token, userId, changes) =>
+      userId === userA.id ? profileFor(userA, stripUndefined(changes)) : null,
+    ),
   };
 }
 
-export function testApp(overrides: { config?: Config } = {}) {
+function stripUndefined<T extends object>(o: T): Partial<{ [K in keyof T]: Exclude<T[K], undefined> }> {
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as never;
+}
+
+export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPolicy } = {}) {
   const gateway = fakeGateway();
   const profiles = fakeProfiles();
   const app = createApp({
@@ -122,6 +130,7 @@ export function testApp(overrides: { config?: Config } = {}) {
     logger: silentLogger,
     authGateway: gateway,
     profiles,
+    ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
   });
   return { app, gateway, profiles };
 }

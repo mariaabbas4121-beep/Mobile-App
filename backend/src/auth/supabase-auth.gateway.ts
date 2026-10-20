@@ -106,7 +106,11 @@ export function createSupabaseAuthGateway(
         // user still exists and that the session has not been signed out.
         const { data, error } = await auth().getUser(accessToken);
         if (error) throw error;
-        return toAuthUser(data.user);
+        const roles = data.user.app_metadata?.roles;
+        return {
+          user: toAuthUser(data.user),
+          roles: Array.isArray(roles) ? roles.filter((r): r is string => typeof r === 'string') : [],
+        };
       } catch (err) {
         throw mapAuthError(err, 'get_user', logger);
       }

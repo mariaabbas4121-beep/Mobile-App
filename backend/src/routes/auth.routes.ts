@@ -16,10 +16,12 @@ import { deriveOnboarding } from '../auth/onboarding.js';
 import { AppError } from '../lib/errors.js';
 import { getAuth, requireAuth } from '../middleware/auth.middleware.js';
 import { validateBody } from '../middleware/validate.middleware.js';
+import type { AuthLimiters } from '../middleware/rate-limit.middleware.js';
 
 export interface AuthRouteDeps {
   gateway: AuthGateway;
   profiles: ProfileRepository;
+  limiters: AuthLimiters;
 }
 
 // Same wording whether or not the address already has an account, so the
@@ -27,7 +29,9 @@ export interface AuthRouteDeps {
 const CONFIRMATION_SENT =
   'If this email address can be registered, a confirmation link has been sent to it. Confirm it, then sign in.';
 
-export function authRoutes({ gateway, profiles }: AuthRouteDeps) {
+// Per-IP limits run before validation (they count every attempt); per-account
+// limits run after it so they key on the normalised email.
+export function authRoutes({ gateway, profiles, limiters }: AuthRouteDeps) {
   const router = Router();
   const authenticated = requireAuth(gateway);
 
@@ -39,7 +43,7 @@ export function authRoutes({ gateway, profiles }: AuthRouteDeps) {
     return profile;
   };
 
-  router.post('/signup', validateBody(signupBody), async (req, res) => {
+  router.post('/signup', limiters.signupPerIp, validateBody(signupBody), async (req, res) => {
     const { email, password, displayName } = req.body as SignupBody;
     const { user, session } = await gateway.signUp({ email, password, displayName });
 
@@ -51,19 +55,30 @@ export function authRoutes({ gateway, profiles }: AuthRouteDeps) {
     res.status(202).json({ success: true, data: { emailConfirmationRequired: true, message: CONFIRMATION_SENT } });
   });
 
-  router.post('/login', validateBody(loginBody), async (req, res) => {
+  router.post(
+    '/login',
+    limiters.loginPerIp,
+    validateBody(loginBody),
+    limiters.loginFailuresPerAccount,
+    async (req, res) => {
     const { email, password } = req.body as LoginBody;
     const { user, session } = await gateway.signIn({ email, password });
     res.status(200).json({ success: true, data: { user, session } });
-  });
+    },
+  );
 
-  router.post('/refresh', validateBody(refreshBody), async (req, res) => {
+  router.post('/refresh', limiters.refreshPerIp, validateBody(refreshBody), async (req, res) => {
     const { refreshToken } = req.body as RefreshBody;
     const { user, session } = await gateway.refresh(refreshToken);
     res.status(200).json({ success: true, data: { user, session } });
   });
 
-  router.post('/email/resend', validateBody(resendConfirmationBody), async (req, res) => {
+  router.post(
+    '/email/resend',
+    limiters.resendPerIp,
+    validateBody(resendConfirmationBody),
+    limiters.resendPerAccount,
+    async (req, res) => {
     const { email } = req.body as ResendConfirmationBody;
     try {
       await gateway.resendSignupConfirmation(email);
@@ -73,7 +88,8 @@ export function authRoutes({ gateway, profiles }: AuthRouteDeps) {
       if (err instanceof AppError && (err.status === 429 || err.status === 503)) throw err;
     }
     res.status(202).json({ success: true, data: { message: CONFIRMATION_SENT } });
-  });
+    },
+  );
 
   router.post('/logout', authenticated, validateBody(logoutBody), async (req, res) => {
     const { scope } = req.body as LogoutBody;

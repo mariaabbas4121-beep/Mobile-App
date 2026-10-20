@@ -56,3 +56,28 @@ export type LoginBody = z.infer<typeof loginBody>;
 export type RefreshBody = z.infer<typeof refreshBody>;
 export type ResendConfirmationBody = z.infer<typeof resendConfirmationBody>;
 export type LogoutBody = z.infer<typeof logoutBody>;
+
+// A text field the user may set or clear (null). Blank strings are rejected
+// rather than stored, and control characters are not allowed.
+const profileText = (min: number, max: number) =>
+  z
+    .string()
+    .trim()
+    .min(min, { error: `must be at least ${min} characters` })
+    .max(max, { error: `must be at most ${max} characters` })
+    .refine((v) => !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(v), { error: 'contains invalid characters' })
+    .nullable()
+    .optional();
+
+// Strict: unknown keys (accountStatus, phone, verification fields, id, ...)
+// are rejected with 400 instead of being silently dropped.
+export const profileUpdateBody = z
+  .strictObject({
+    displayName: profileText(2, 50),
+    city: profileText(2, 80),
+    neighborhood: profileText(2, 80),
+    bio: profileText(1, 500),
+  })
+  .refine((v) => Object.values(v).some((x) => x !== undefined), { error: 'at least one field is required' });
+
+export type ProfileUpdateBody = z.infer<typeof profileUpdateBody>;

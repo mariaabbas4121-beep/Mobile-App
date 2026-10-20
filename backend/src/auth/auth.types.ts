@@ -52,6 +52,16 @@ export interface Verification {
 export interface AuthContext {
   user: AuthUser;
   accessToken: string;
+  // From app_metadata.roles, which only the secret key can write. Used for
+  // server-side authorization; never returned to clients.
+  roles: string[];
+}
+
+export interface ProfileUpdate {
+  displayName?: string | null | undefined;
+  city?: string | null | undefined;
+  neighborhood?: string | null | undefined;
+  bio?: string | null | undefined;
 }
 
 // Supabase Auth operations the API uses. Implementations throw AppError with
@@ -65,7 +75,7 @@ export interface AuthGateway {
   refresh(refreshToken: string): Promise<{ user: AuthUser; session: AuthSession }>;
   resendSignupConfirmation(email: string): Promise<void>;
   // Validates the access token with the Supabase Auth server.
-  getUser(accessToken: string): Promise<AuthUser>;
+  getUser(accessToken: string): Promise<{ user: AuthUser; roles: string[] }>;
   signOut(accessToken: string, scope: SignOutScope): Promise<void>;
 }
 
@@ -73,4 +83,6 @@ export interface AuthGateway {
 export interface ProfileRepository {
   getProfile(accessToken: string, userId: string): Promise<Profile | null>;
   getVerifications(accessToken: string, userId: string): Promise<Verification[]>;
+  // Returns null when Row-Level Security refused the update.
+  updateProfile(accessToken: string, userId: string, changes: ProfileUpdate): Promise<Profile | null>;
 }

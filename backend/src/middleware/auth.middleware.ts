@@ -26,8 +26,18 @@ export function requireAuth(gateway: AuthGateway): RequestHandler {
       throw AppError.unauthenticated('Access token is invalid or expired', 'INVALID_TOKEN');
     }
     const accessToken = match[1];
-    const user = await gateway.getUser(accessToken);
-    req.auth = { user, accessToken };
+    const { user, roles } = await gateway.getUser(accessToken);
+    req.auth = { user, accessToken, roles };
+    next();
+  };
+}
+
+// Authorization for privileged routes. Mount after requireAuth. Roles live in
+// Supabase app_metadata, which users cannot edit; anything in the request
+// itself is ignored.
+export function requireRole(role: string): RequestHandler {
+  return (req, _res, next) => {
+    if (!getAuth(req).roles.includes(role)) throw AppError.forbidden();
     next();
   };
 }
