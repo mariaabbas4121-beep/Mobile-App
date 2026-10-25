@@ -7,7 +7,6 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "scheme": "neighborshare",
-    
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.neighborshare.app",
@@ -42,12 +41,12 @@
         }
       ],
       [
-       "expo-splash-screen",
-    {
-     "resizeMode": "contain",
-      "backgroundColor": "#0F172A"
-    }
-  ],
+        "expo-splash-screen",
+        {
+          "resizeMode": "contain",
+          "backgroundColor": "#0F172A"
+        }
+      ],
       [
         "expo-camera",
         {
@@ -56,7 +55,9 @@
       ],
       "expo-font",
       "expo-status-bar",
-      "expo-splash-screen"
+      "expo-splash-screen",
+      "expo-secure-store",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true

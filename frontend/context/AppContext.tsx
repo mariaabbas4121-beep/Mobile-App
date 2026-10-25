@@ -1,13 +1,12 @@
 import React, { createContext, useContext, useState, ReactNode } from 'react';
 import { MOCK_ITEMS, MOCK_TRANSACTIONS, MOCK_USERS, Item, Transaction, User } from '../data/mockData';
 
+// Sample listings and transactions for the screens that are not yet backed
+// by the API. Authentication lives in AuthContext.
 type AppContextType = {
   currentUser: User;
   items: Item[];
   transactions: Transaction[];
-  isLoggedIn: boolean;
-  login: () => void;
-  logout: () => void;
   requestBorrow: (itemId: string, teachMe: boolean) => Transaction;
   completeTransaction: (txnId: string) => void;
   addItem: (item: Partial<Item>) => void;
@@ -20,15 +19,11 @@ type AppContextType = {
 const AppContext = createContext<AppContextType | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [items, setItems] = useState<Item[]>(MOCK_ITEMS);
   const [transactions, setTransactions] = useState<Transaction[]>(MOCK_TRANSACTIONS);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState('all');
   const currentUser = MOCK_USERS[0];
-
-  const login = () => setIsLoggedIn(true);
-  const logout = () => setIsLoggedIn(false);
 
   const requestBorrow = (itemId: string, teachMe: boolean): Transaction => {
     const item = items.find(i => i.id === itemId)!;
@@ -84,9 +79,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       currentUser,
       items,
       transactions,
-      isLoggedIn,
-      login,
-      logout,
       requestBorrow,
       completeTransaction,
       addItem,

@@ -1,226 +1,110 @@
-import { useState } from "react";
+import { useRef, useState } from 'react';
+import type { TextInput } from 'react-native';
+import { useRouter } from 'expo-router';
+import { useAuth } from '../../context/AuthContext';
+import { isApiError } from '../../lib/api/client';
+import { errorMessage, fieldErrorsFrom } from '../../lib/auth/messages';
+import { normaliseEmail, validateLogin } from '../../lib/auth/validation';
+import { useSubmit } from '../../components/auth/useSubmit';
+import { useGoogleSignIn } from '../../components/auth/useGoogleSignIn';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  TextInput,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-} from "react-native";
-import { useRouter } from "expo-router";
-import { LinearGradient } from "expo-linear-gradient";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
-import Toast from "react-native-toast-message";
-import { useApp } from "../../context/AppContext";
-import { Colors, Typography, Spacing, Radii, Shadows } from "../../utils/theme";
+  AuthHeader,
+  AuthScreen,
+  Card,
+  Divider,
+  Field,
+  GoogleButton,
+  LinkRow,
+  Notice,
+  PrimaryButton,
+} from '../../components/auth/AuthUI';
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { login } = useApp();
+  const { signIn } = useAuth();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [errors, setErrors] = useState<{ email?: string; password?: string }>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const google = useGoogleSignIn(setFormError);
+  const passwordRef = useRef<TextInput>(null);
 
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [showPass, setShowPass] = useState(false);
+  const [submit, submitting] = useSubmit(async () => {
+    setFormError(null);
+    const found = validateLogin({ email, password });
+    setErrors(found);
+    if (Object.keys(found).length) return;
 
-  const handleLogin = () => {
-    if (!email || !password) {
-      Toast.show({
-        type: "error",
-        text1: "Please fill all fields",
-      });
-      return;
+    try {
+      await signIn(email, password);
+      // Navigation follows the auth state.
+    } catch (err) {
+      if (isApiError(err) && err.code === 'EMAIL_NOT_CONFIRMED') {
+        router.push({ pathname: '/auth/check-email', params: { email: normaliseEmail(email), reason: 'unconfirmed' } });
+        return;
+      }
+      const fieldErrors = fieldErrorsFrom(err, ['email', 'password'] as const);
+      if (Object.keys(fieldErrors).length) setErrors(fieldErrors);
+      else setFormError(errorMessage(err));
+      // Never keep a rejected password in the field.
+      if (isApiError(err) && err.code === 'INVALID_CREDENTIALS') setPassword('');
     }
+  });
 
-    // TODO(Phase 1): sign in through the API (POST /api/auth/login). Until
-    // then no account is checked and the user is not signed in.
-    Toast.show({
-      type: "info",
-      text1: "Sign-in is not available yet",
-      text2: "Account sign-in is being added in the next phase.",
-    });
-  };
-
-  // Development only: open the app with the local mock data. This is not a
-  // sign-in; no credentials are checked and nothing is sent to a server.
-  const exploreDemo = () => {
-    login();
-    router.replace("/(tabs)");
-  };
+  const busy = submitting || google.busy;
 
   return (
-    <View style={styles.container}>
-      <LinearGradient
-        colors={[Colors.white, Colors.offWhite]}
-        style={StyleSheet.absoluteFill}
-      />
+    <AuthScreen onBack={() => (router.canGoBack() ? router.back() : router.replace('/auth/welcome'))}>
+      <AuthHeader title="Welcome back" subtitle="Sign in to your NeighborShare account" />
 
-      <SafeAreaView style={styles.safe}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-          style={{ flex: 1 }}
-        >
-          <ScrollView
-            contentContainerStyle={styles.scroll}
-            keyboardShouldPersistTaps="handled"
-          >
-            {/* Back */}
-            <TouchableOpacity onPress={() => router.back()} style={styles.back}>
-              <Ionicons
-                name="arrow-back"
-                size={22}
-                color={Colors.greenDark || Colors.slate}
-              />
-            </TouchableOpacity>
+      <Card>
+        {formError ? <Notice tone="error">{formError}</Notice> : null}
 
-            {/* Header */}
-            <View style={styles.header}>
-              <Text style={styles.title}>Welcome back</Text>
-              <Text style={styles.subtitle}>
-                Sign in to your NeighborShare account
-              </Text>
-            </View>
+        <GoogleButton onPress={google.start} loading={google.busy} disabled={busy} />
+        <Divider label="or sign in with email" />
 
-            {/* Card */}
-            <View style={styles.card}>
+        <Field
+          label="Email"
+          icon="mail-outline"
+          value={email}
+          onChangeText={(v) => {
+            setEmail(v);
+            if (errors.email) setErrors((e) => ({ ...e, email: undefined }));
+          }}
+          error={errors.email}
+          placeholder="you@example.com"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoComplete="email"
+          textContentType="username"
+          returnKeyType="next"
+          onSubmitEditing={() => passwordRef.current?.focus()}
+          editable={!busy}
+        />
+        <Field
+          ref={passwordRef}
+          label="Password"
+          icon="lock-closed-outline"
+          password
+          value={password}
+          onChangeText={(v) => {
+            setPassword(v);
+            if (errors.password) setErrors((e) => ({ ...e, password: undefined }));
+          }}
+          error={errors.password}
+          placeholder="Your password"
+          autoCapitalize="none"
+          autoComplete="current-password"
+          textContentType="password"
+          returnKeyType="go"
+          onSubmitEditing={() => void submit()}
+          editable={!busy}
+        />
 
-              {/* Email */}
-              <View style={styles.fieldGroup}>
-                <Text style={styles.label}>Email</Text>
-                <View style={styles.inputRow}>
-                  <Ionicons name="mail-outline" size={18} color={Colors.green} />
-                  <TextInput
-                    style={styles.input}
-                    value={email}
-                    onChangeText={setEmail}
-                    placeholder="you@example.com"
-                    placeholderTextColor={Colors.slate}
-                    keyboardType="email-address"
-                    autoCapitalize="none"
-                  />
-                </View>
-              </View>
+        <PrimaryButton title="Sign in" onPress={() => void submit()} loading={submitting} disabled={busy} />
+      </Card>
 
-              {/* Password */}
-              <View style={styles.fieldGroup}>
-                <Text style={styles.label}>Password</Text>
-                <View style={styles.inputRow}>
-                  <Ionicons name="lock-closed-outline" size={18} color={Colors.green} />
-                  <TextInput
-                    style={[styles.input, { flex: 1 }]}
-                    value={password}
-                    onChangeText={setPassword}
-                    placeholder="Your password"
-                    placeholderTextColor={Colors.slate}
-                    secureTextEntry={!showPass}
-                  />
-                  <TouchableOpacity onPress={() => setShowPass(!showPass)}>
-                    <Ionicons
-                      name={showPass ? "eye-off-outline" : "eye-outline"}
-                      size={18}
-                      color={Colors.green}
-                    />
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              {/* Forgot */}
-              <TouchableOpacity
-                onPress={() => router.push("/auth/forgot-password")}
-                style={styles.forgotRow}
-              >
-                <Text style={styles.forgot}>Forgot password?</Text>
-              </TouchableOpacity>
-
-              {/* Button */}
-              <TouchableOpacity
-                onPress={handleLogin}
-                style={styles.btnPrimary}
-              >
-                <LinearGradient
-                  colors={["#2e7d32", "#1b5e20"]}
-                  style={styles.btnGrad}
-                >
-                  <Text style={styles.btnText}>Sign In</Text>
-                </LinearGradient>
-              </TouchableOpacity>
-
-            </View>
-
-            {/* Signup */}
-            <View style={styles.signupRow}>
-              <Text style={styles.signupText}>Don't have an account? </Text>
-              <TouchableOpacity onPress={() => router.push("/auth/signup")}>
-                <Text style={styles.signupLink}>Sign up</Text>
-              </TouchableOpacity>
-            </View>
-
-            {__DEV__ && (
-              <TouchableOpacity onPress={exploreDemo} style={styles.demoRow}>
-                <Text style={styles.demoText}>
-                  Development: explore with mock data
-                </Text>
-              </TouchableOpacity>
-            )}
-
-          </ScrollView>
-        </KeyboardAvoidingView>
-      </SafeAreaView>
-    </View>
+      <LinkRow text="Don't have an account?" link="Sign up" onPress={() => router.replace('/auth/signup')} />
+    </AuthScreen>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1 },
-  safe: { flex: 1 },
-  scroll: {
-    flexGrow: 1,
-    paddingHorizontal: 20,
-    paddingBottom: 30,
-  },
-  back: { marginTop: 10, marginBottom: 20 },
-  header: { marginBottom: 30 },
-  title: {
-    fontSize: 28,
-    fontWeight: "bold",
-    color: "#1b5e20",
-  },
-  subtitle: {
-    fontSize: 14,
-    color: "#666",
-    marginTop: 5,
-  },
-  card: {
-    backgroundColor: "#fff",
-    padding: 20,
-    borderRadius: 16,
-    elevation: 3,
-  },
-  fieldGroup: { marginBottom: 15 },
-  label: { marginBottom: 5, fontWeight: "600", color: "#1b5e20" },
-  inputRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#ddd",
-    paddingHorizontal: 10,
-    borderRadius: 10,
-  },
-  input: { flex: 1, padding: 10 },
-  forgotRow: { alignItems: "flex-end", marginVertical: 10 },
-  forgot: { color: "#2e7d32", fontWeight: "600" },
-  btnPrimary: { borderRadius: 10, overflow: "hidden", marginTop: 10 },
-  btnGrad: { padding: 14, alignItems: "center" },
-  btnText: { color: "#fff", fontWeight: "bold" },
-  signupRow: {
-    flexDirection: "row",
-    justifyContent: "center",
-    marginTop: 20,
-  },
-  signupText: { color: "#666" },
-  signupLink: { color: "#2e7d32", fontWeight: "bold" },
-  demoRow: { alignItems: "center", marginTop: 16 },
-  demoText: { color: "#666", textDecorationLine: "underline" },
-});

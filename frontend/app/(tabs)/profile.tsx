@@ -1,11 +1,12 @@
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Dimensions,
+  Dimensions, Alert,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../context/AuthContext';
 import { Colors, Typography, Spacing, Radii, Shadows } from '../../utils/theme';
 
 const { width } = Dimensions.get('window');
@@ -39,11 +40,23 @@ const MENU_ITEMS = [
 ];
 
 export default function ProfileScreen() {
-  const { currentUser, logout, transactions } = useApp();
+  // Name, join date and account status come from the signed-in account;
+  // the statistics below are still sample data.
+  const { currentUser, transactions } = useApp();
+  const { profile, user, signOut } = useAuth();
   const completedCount = transactions.filter(t => t.status === 'Completed').length;
 
-  const profileName = "Maria Abbas";
-  const memberSinceDate = currentUser?.memberSince || "June 2026";
+  const profileName = profile?.displayName || user?.email || 'Your profile';
+  const joined = profile?.createdAt ?? user?.createdAt;
+  const memberSinceDate = joined
+    ? new Date(joined).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+    : '';
+
+  const confirmSignOut = () =>
+    Alert.alert('Sign out?', 'You will need to sign in again to use NeighborShare.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Sign out', style: 'destructive', onPress: () => void signOut() },
+    ]);
 
   return (
     <View style={styles.container}>
@@ -53,7 +66,12 @@ export default function ProfileScreen() {
           <SafeAreaView edges={['top']} style={styles.headerSafe}>
             {/* Picture circle has been removed from here */}
             <Text style={styles.userName}>{profileName}</Text>
-            <Text style={styles.userMeta}>Member since {memberSinceDate}</Text>
+            {memberSinceDate ? <Text style={styles.userMeta}>Member since {memberSinceDate}</Text> : null}
+            {profile?.accountStatus === 'restricted' && (
+              <Text style={styles.userMeta} accessibilityRole="alert">
+                Your account is restricted. Some features may be unavailable.
+              </Text>
+            )}
 
             {/* Stats row */}
             <View style={styles.statsRow}>
@@ -139,7 +157,9 @@ export default function ProfileScreen() {
               <TouchableOpacity
                 key={item.label}
                 style={[styles.menuItem, i < MENU_ITEMS.length - 1 && styles.menuItemBorder]}
-                onPress={item.label === 'Sign Out' ? logout : undefined}
+                onPress={item.label === 'Sign Out' ? confirmSignOut : undefined}
+                accessibilityRole="button"
+                accessibilityLabel={item.label}
                 activeOpacity={0.7}
               >
                 <View style={[styles.menuIcon, { backgroundColor: item.color === '#ef4444' ? '#fee2e2' : '#e8f5e9' }]}>

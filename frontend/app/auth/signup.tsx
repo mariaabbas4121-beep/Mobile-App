@@ -1,259 +1,150 @@
-import { useState } from "react";
+import { useRef, useState } from 'react';
+import type { TextInput } from 'react-native';
+import { useRouter } from 'expo-router';
+import { useAuth } from '../../context/AuthContext';
+import { isApiError } from '../../lib/api/client';
+import { errorMessage, fieldErrorsFrom } from '../../lib/auth/messages';
+import { normaliseEmail, validateSignup, type SignupErrors, type SignupForm } from '../../lib/auth/validation';
+import { useSubmit } from '../../components/auth/useSubmit';
+import { useGoogleSignIn } from '../../components/auth/useGoogleSignIn';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  TextInput,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-} from "react-native";
-import { useRouter } from "expo-router";
-import { LinearGradient } from "expo-linear-gradient";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
-import Toast from "react-native-toast-message";
-import { Colors, Typography, Spacing, Radii, Shadows } from "../../utils/theme";
+  AuthHeader,
+  AuthScreen,
+  Card,
+  Divider,
+  Field,
+  GoogleButton,
+  LinkRow,
+  Notice,
+  PrimaryButton,
+} from '../../components/auth/AuthUI';
+
+const FIELDS = ['displayName', 'email', 'password'] as const;
 
 export default function SignupScreen() {
   const router = useRouter();
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [password, setPassword] = useState("");
+  const { signUp } = useAuth();
+  const [form, setForm] = useState<SignupForm>({ displayName: '', email: '', password: '', confirmPassword: '' });
+  const [errors, setErrors] = useState<SignupErrors>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const google = useGoogleSignIn(setFormError);
 
-  const handleSignup = () => {
-    if (!name || !email || !password) {
-      Toast.show({ type: "error", text1: "Please fill required fields" });
-      return;
-    }
+  const emailRef = useRef<TextInput>(null);
+  const passwordRef = useRef<TextInput>(null);
+  const confirmRef = useRef<TextInput>(null);
 
-    // TODO(Phase 1): create the account through the API
-    // (POST /api/auth/signup). Until then no account is created.
-    Toast.show({
-      type: "info",
-      text1: "Account creation is not available yet",
-      text2: "Account sign-up is being added in the next phase.",
-    });
+  const set = (key: keyof SignupForm) => (value: string) => {
+    setForm((f) => ({ ...f, [key]: value }));
+    if (errors[key]) setErrors((e) => ({ ...e, [key]: undefined }));
   };
 
+  const [submit, submitting] = useSubmit(async () => {
+    setFormError(null);
+    const found = validateSignup(form);
+    setErrors(found);
+    if (Object.keys(found).length) return;
+
+    try {
+      const result = await signUp({ email: form.email, password: form.password, displayName: form.displayName });
+      if (result.emailConfirmationRequired) {
+        // The response is identical whether or not the address already has
+        // an account, and email delivery is not guaranteed, so the next
+        // screen does not claim an email was sent.
+        router.replace({ pathname: '/auth/check-email', params: { email: normaliseEmail(form.email), reason: 'signup' } });
+      }
+      // Otherwise the account is signed in and navigation follows the auth state.
+    } catch (err) {
+      const fieldErrors = fieldErrorsFrom(err, FIELDS);
+      if (isApiError(err) && err.code === 'WEAK_PASSWORD') {
+        setErrors({ password: errorMessage(err) });
+      } else if (Object.keys(fieldErrors).length) {
+        setErrors(fieldErrors);
+      } else {
+        setFormError(errorMessage(err));
+      }
+    }
+  });
+
+  const busy = submitting || google.busy;
+
   return (
-    <View style={styles.container}>
-      {/* Light White/Mint Background Gradient */}
-      <LinearGradient
-        colors={[Colors.white, Colors.offWhite]}
-        style={StyleSheet.absoluteFill}
-      />
-      <SafeAreaView style={styles.safe}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-          style={{ flex: 1 }}
-        >
-          <ScrollView
-            contentContainerStyle={styles.scroll}
-            keyboardShouldPersistTaps="handled"
-          >
-            <TouchableOpacity onPress={() => router.back()} style={styles.back}>
-              <Ionicons
-                name="arrow-back"
-                size={22}
-                color={Colors.greenDark || Colors.slate}
-              />
-            </TouchableOpacity>
+    <AuthScreen onBack={() => (router.canGoBack() ? router.back() : router.replace('/auth/welcome'))}>
+      <AuthHeader title="Join the neighborhood" subtitle="Create your NeighborShare account" />
 
-            <View style={styles.header}>
-              <Text style={styles.title}>Join the neighborhood</Text>
-              <Text style={styles.subtitle}>
-                Create your account in seconds
-              </Text>
-            </View>
+      <Card>
+        {formError ? <Notice tone="error">{formError}</Notice> : null}
 
-            <View style={styles.card}>
-              {[
-                {
-                  label: "Full Name *",
-                  icon: "person-outline",
-                  value: name,
-                  set: setName,
-                  placeholder: "Maria Abbas",
-                  keyboard: "default" as const,
-                },
-                {
-                  label: "Email *",
-                  icon: "mail-outline",
-                  value: email,
-                  set: setEmail,
-                  placeholder: "maria@example.com",
-                  keyboard: "email-address" as const,
-                },
-                {
-                  label: "Phone (optional)",
-                  icon: "call-outline",
-                  value: phone,
-                  set: setPhone,
-                  placeholder: "+92 300 0000000",
-                  keyboard: "phone-pad" as const,
-                },
-                {
-                  label: "Password *",
-                  icon: "lock-closed-outline",
-                  value: password,
-                  set: setPassword,
-                  placeholder: "Min. 8 characters",
-                  keyboard: "default" as const,
-                  secure: true,
-                },
-              ].map((field) => (
-                <View key={field.label} style={styles.fieldGroup}>
-                  <Text style={styles.label}>{field.label}</Text>
-                  <View style={styles.inputRow}>
-                    <Ionicons
-                      name={field.icon as any}
-                      size={18}
-                      color={Colors.green || Colors.slate}
-                    />
-                    <TextInput
-                      style={styles.input}
-                      value={field.value}
-                      onChangeText={field.set}
-                      placeholder={field.placeholder}
-                      placeholderTextColor={Colors.slate}
-                      keyboardType={field.keyboard}
-                      secureTextEntry={field.secure}
-                      autoCapitalize={
-                        field.keyboard === "email-address" ? "none" : "words"
-                      }
-                    />
-                  </View>
-                </View>
-              ))}
+        <GoogleButton onPress={google.start} loading={google.busy} disabled={busy} />
+        <Divider label="or sign up with email" />
 
-              <View style={styles.terms}>
-                <Ionicons
-                  name="shield-checkmark-outline"
-                  size={14}
-                  color={Colors.green || Colors.sage}
-                />
-                <Text style={styles.termsText}>
-                  By signing up, you agree to our Terms of Service and Privacy
-                  Policy
-                </Text>
-              </View>
+        <Field
+          label="Full name"
+          icon="person-outline"
+          value={form.displayName}
+          onChangeText={set('displayName')}
+          error={errors.displayName}
+          placeholder="Your name"
+          autoCapitalize="words"
+          autoComplete="name"
+          textContentType="name"
+          returnKeyType="next"
+          onSubmitEditing={() => emailRef.current?.focus()}
+          editable={!busy}
+        />
+        <Field
+          ref={emailRef}
+          label="Email"
+          icon="mail-outline"
+          value={form.email}
+          onChangeText={set('email')}
+          error={errors.email}
+          placeholder="you@example.com"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoComplete="email"
+          textContentType="emailAddress"
+          returnKeyType="next"
+          onSubmitEditing={() => passwordRef.current?.focus()}
+          editable={!busy}
+        />
+        <Field
+          ref={passwordRef}
+          label="Password"
+          icon="lock-closed-outline"
+          password
+          value={form.password}
+          onChangeText={set('password')}
+          error={errors.password}
+          hint="At least 8 characters, with a letter and a number."
+          placeholder="Create a password"
+          autoCapitalize="none"
+          autoComplete="new-password"
+          textContentType="newPassword"
+          returnKeyType="next"
+          onSubmitEditing={() => confirmRef.current?.focus()}
+          editable={!busy}
+        />
+        <Field
+          ref={confirmRef}
+          label="Confirm password"
+          icon="lock-closed-outline"
+          password
+          value={form.confirmPassword}
+          onChangeText={set('confirmPassword')}
+          error={errors.confirmPassword}
+          placeholder="Repeat your password"
+          autoCapitalize="none"
+          autoComplete="new-password"
+          textContentType="newPassword"
+          returnKeyType="go"
+          onSubmitEditing={() => void submit()}
+          editable={!busy}
+        />
 
-              <TouchableOpacity
-                style={styles.btnPrimary}
-                onPress={handleSignup}
-                activeOpacity={0.85}
-              >
-                {/* Green Gradient Button */}
-                <LinearGradient
-                  colors={[
-                    Colors.green || "#2e7d32",
-                    Colors.greenDark || "#1b5e20",
-                  ]}
-                  style={styles.btnGrad}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                >
-                  <Text style={styles.btnText}>Create Account</Text>
-                </LinearGradient>
-              </TouchableOpacity>
-            </View>
+        <PrimaryButton title="Create account" onPress={() => void submit()} loading={submitting} disabled={busy} />
+      </Card>
 
-            <View style={styles.loginRow}>
-              <Text style={styles.loginText}>Already a member? </Text>
-              <TouchableOpacity onPress={() => router.push("/auth/login")}>
-                <Text style={styles.loginLink}>Sign in</Text>
-              </TouchableOpacity>
-            </View>
-          </ScrollView>
-        </KeyboardAvoidingView>
-      </SafeAreaView>
-    </View>
+      <LinkRow text="Already a member?" link="Sign in" onPress={() => router.replace('/auth/login')} />
+    </AuthScreen>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1 },
-  safe: { flex: 1 },
-  scroll: {
-    flexGrow: 1,
-    paddingHorizontal: Spacing.xl,
-    paddingBottom: Spacing["2xl"],
-  },
-  back: { marginTop: Spacing.md, marginBottom: Spacing.xl, width: 40 },
-  header: { marginBottom: Spacing["2xl"] },
-  title: {
-    fontSize: Typography.sizes["2xl"],
-    fontWeight: Typography.weights.extrabold,
-    color: Colors.greenDark || "#1b5e20",
-    letterSpacing: -0.5,
-  },
-  subtitle: {
-    fontSize: Typography.sizes.base,
-    color: Colors.slate,
-    marginTop: Spacing.xs,
-  },
-  card: {
-    backgroundColor: Colors.white,
-    borderRadius: Radii.xl,
-    padding: Spacing.xl,
-    ...Shadows.lg,
-    borderWidth: 1,
-    borderColor: Colors.fog,
-  },
-  fieldGroup: { marginBottom: Spacing.base },
-  label: {
-    fontSize: Typography.sizes.sm,
-    fontWeight: Typography.weights.semibold,
-    color: Colors.greenDark || "#1b5e20",
-    marginBottom: Spacing.xs,
-  },
-  inputRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1.5,
-    borderColor: Colors.fog,
-    borderRadius: Radii.md,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm + 2,
-    backgroundColor: Colors.offWhite,
-    gap: Spacing.sm,
-  },
-  input: {
-    flex: 1,
-    fontSize: Typography.sizes.base,
-    color: Colors.greenDark || "#1b5e20",
-  },
-  terms: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: Spacing.xs,
-    marginBottom: Spacing.lg,
-  },
-  termsText: {
-    flex: 1,
-    fontSize: Typography.sizes.xs,
-    color: Colors.slate,
-    lineHeight: 16,
-  },
-  btnPrimary: { borderRadius: Radii.lg, overflow: "hidden" },
-  btnGrad: { paddingVertical: Spacing.base, alignItems: "center" },
-  btnText: {
-    fontSize: Typography.sizes.md,
-    fontWeight: Typography.weights.bold,
-    color: Colors.white,
-  },
-  loginRow: {
-    flexDirection: "row",
-    justifyContent: "center",
-    marginTop: Spacing.xl,
-  },
-  loginText: { color: Colors.slate, fontSize: Typography.sizes.base },
-  loginLink: {
-    color: Colors.green || "#2e7d32",
-    fontWeight: Typography.weights.semibold,
-    fontSize: Typography.sizes.base,
-  },
-});

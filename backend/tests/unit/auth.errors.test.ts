@@ -2,6 +2,7 @@
 // from an API response.
 import { describe, expect, test } from 'vitest';
 import { AuthApiError, AuthRetryableFetchError, AuthSessionMissingError, AuthWeakPasswordError } from '@supabase/supabase-js';
+import { pino } from 'pino';
 import { mapAuthError } from '../../src/auth/auth.errors.js';
 import { AppError } from '../../src/lib/errors.js';
 import { silentLogger } from '../helpers.js';
@@ -47,6 +48,30 @@ describe('mapAuthError', () => {
     const mapped = mapAuthError(new AuthSessionMissingError(), op, silentLogger);
     expect(mapped.status).toBe(401);
     expect(mapped.code).toBe(code);
+  });
+
+  test.each([
+    ['signup', 'Error sending confirmation email'],
+    ['resend', 'Error sending confirmation email'],
+    ['signup', 'SMTP server rejected the message'],
+  ] as const)('a Supabase 500 about sending email during %s -> 503 EMAIL_DELIVERY_UNAVAILABLE', (op, message) => {
+    const mapped = mapAuthError(new AuthRetryableFetchError(message, 500), op, silentLogger);
+    expect(mapped.status).toBe(503);
+    expect(mapped.code).toBe('EMAIL_DELIVERY_UNAVAILABLE');
+  });
+
+  test('other Supabase 500s, and email-like 500s during login, stay AUTH_UNAVAILABLE', () => {
+    expect(mapAuthError(new AuthRetryableFetchError('Database error saving new user', 500), 'signup', silentLogger).code).toBe('AUTH_UNAVAILABLE');
+    expect(mapAuthError(new AuthRetryableFetchError('Error sending confirmation email', 500), 'login', silentLogger).code).toBe('AUTH_UNAVAILABLE');
+  });
+
+  test('the logged provider message never contains an email address', () => {
+    const lines: string[] = [];
+    const logger = pino({ level: 'trace' }, { write: (l: string) => void lines.push(l) });
+    mapAuthError(new AuthRetryableFetchError('Error sending confirmation email to sara@example.com', 500), 'signup', logger);
+    const out = lines.join('\n');
+    expect(out).toContain('Error sending confirmation email to [email]');
+    expect(out).not.toContain('sara@example.com');
   });
 
   test('network failures map to 503', () => {

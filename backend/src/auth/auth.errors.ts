@@ -11,6 +11,12 @@ export type AuthOperation = 'signup' | 'login' | 'refresh' | 'resend' | 'get_use
 
 const UNAVAILABLE = () => AppError.unavailable('Authentication service is temporarily unavailable', 'AUTH_UNAVAILABLE');
 
+// Supabase's message when its mailer (built-in or custom SMTP) fails, e.g.
+// "Error sending confirmation email".
+const EMAIL_SEND_FAILURE = /send(ing)?\b.*\b(e-?mail|mail)|smtp/i;
+
+const redactEmails = (text: string) => text.replace(/[^\s@]+@[^\s@]+/g, '[email]').slice(0, 300);
+
 // Translates a Supabase Auth error into a client-safe AppError. Only the
 // error's code and HTTP status are inspected or logged; its message can
 // contain the submitted email and is never forwarded.
@@ -18,7 +24,18 @@ export function mapAuthError(err: unknown, operation: AuthOperation, logger: Log
   if (err instanceof AppError) return err;
 
   if (isAuthRetryableFetchError(err)) {
-    logger.warn({ operation, status: err.status }, 'auth provider unreachable');
+    // auth-js reports every 5xx from Supabase as "retryable", carrying
+    // Supabase's own message. That message is logged (with any email address
+    // removed) because it is the only clue to the real cause.
+    const providerMessage = redactEmails(err.message);
+    if ((operation === 'signup' || operation === 'resend') && err.status === 500 && EMAIL_SEND_FAILURE.test(err.message)) {
+      logger.error(
+        { operation, status: err.status, providerMessage },
+        'Supabase could not send the email: check custom SMTP settings and the Auth logs in the Supabase dashboard',
+      );
+      return AppError.unavailable('Email delivery is temporarily unavailable', 'EMAIL_DELIVERY_UNAVAILABLE');
+    }
+    logger.warn({ operation, status: err.status, providerMessage }, err.status ? 'auth provider error' : 'auth provider unreachable');
     return UNAVAILABLE();
   }
 
