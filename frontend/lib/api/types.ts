@@ -66,6 +66,22 @@ export interface ProfileUpdate {
 
 export type LogoutScope = 'local' | 'global' | 'others';
 
+// GET/POST /verification/phone*. Numbers are masked by the server.
+export interface PhoneVerification {
+  status: VerificationStatus;
+  verifiedAt: string | null;
+  phone: string | null;
+  pendingPhone: string | null;
+  // ISO time the server will next send a code, or null if it would now.
+  resendAvailableAt: string | null;
+  codeLength: number;
+}
+
+// `codeSent` means Supabase accepted the request, not that the SMS arrived.
+export type PhoneStartResult =
+  | { verification: PhoneVerification; codeSent: true; message: string }
+  | { verification: PhoneVerification; codeSent: false };
+
 // Codes the backend documents (backend/docs/API.md#error-codes), plus codes
 // this client produces itself when no usable response arrives.
 export type ApiErrorCode =
@@ -97,6 +113,15 @@ export type ApiErrorCode =
   | 'DATABASE_UNAVAILABLE'
   | 'EMAIL_DELIVERY_UNAVAILABLE'
   | 'SERVER_NOT_CONFIGURED'
+  // Phone verification
+  | 'INVALID_PHONE'
+  | 'PHONE_COUNTRY_NOT_SUPPORTED'
+  | 'PHONE_ALREADY_ON_ACCOUNT'
+  | 'NO_PENDING_PHONE_VERIFICATION'
+  | 'OTP_INVALID_OR_EXPIRED'
+  | 'PHONE_VERIFICATION_UNAVAILABLE'
+  | 'PHONE_VERIFICATION_NOT_CONFIGURED'
+  | 'SMS_DELIVERY_UNAVAILABLE'
   // Client-side
   | 'NETWORK_ERROR'
   | 'TIMEOUT'

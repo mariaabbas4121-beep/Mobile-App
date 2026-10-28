@@ -21,7 +21,10 @@ function setup(opts: { configured?: boolean; browser?: BrowserResult; exchange?:
   );
   const createSupabase = jest.fn(() => ({ auth: { signInWithOAuth, exchangeCodeForSession: exchange } }) as unknown as SupabaseClient);
   const openAuthSession = jest.fn(async () => opts.browser ?? { type: 'success', url: `${REDIRECT}?code=abc123` });
+  const warn = jest.fn();
   const google = createGoogleAuth({
+    lateCallbackMs: 30,
+    warn,
     config:
       opts.configured === false
         ? { supabaseUrl: null, supabasePublishableKey: null }
@@ -30,7 +33,7 @@ function setup(opts: { configured?: boolean; browser?: BrowserResult; exchange?:
     openAuthSession,
     createSupabase,
   });
-  return { google, exchange, signInWithOAuth, openAuthSession, createSupabase };
+  return { google, exchange, signInWithOAuth, openAuthSession, createSupabase, warn };
 }
 
 const rejection = async (p: Promise<unknown>) => {
@@ -40,6 +43,10 @@ const rejection = async (p: Promise<unknown>) => {
     return e as OAuthError;
   }
   throw new Error('expected rejection');
+};
+
+const waitUntil = async (check: () => boolean) => {
+  for (let i = 0; i < 50 && !check(); i++) await new Promise((r) => setTimeout(r, 1));
 };
 
 describe('Google sign-in', () => {
@@ -65,10 +72,67 @@ describe('Google sign-in', () => {
     expect(exchange).toHaveBeenCalledWith('abc', { flowId: 'flow-1' });
   });
 
-  test.each(['cancel', 'dismiss'])('browser result "%s" is a cancellation, not an error', async (type) => {
+  test.each(['cancel', 'dismiss'])('browser result "%s" with no redirect is a cancellation, not an error', async (type) => {
     const { google, exchange } = setup({ browser: { type } });
     await expect(google.signIn()).resolves.toEqual({ type: 'cancelled' });
     expect(exchange).not.toHaveBeenCalled();
+  });
+
+  test('a dismissed browser that never returned explains the redirect allow-list (development hint)', async () => {
+    const { google, warn } = setup({ browser: { type: 'dismiss' } });
+    await google.signIn();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(REDIRECT));
+    expect(warn.mock.calls[0][0]).toContain('Redirect URLs');
+  });
+
+  test('an explicit cancel resolves at once, without the hint', async () => {
+    const { google, warn } = setup({ browser: { type: 'cancel' } });
+    await google.signIn();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('Android: "dismiss" reported just before the deep link still completes sign-in', async () => {
+    // expo-web-browser resolves "dismiss" when the app becomes active; the
+    // redirect then reaches the callback route a moment later.
+    let finishBrowser!: (r: BrowserResult) => void;
+    const { google, exchange, openAuthSession } = setup();
+    openAuthSession.mockImplementation(() => new Promise((resolve) => (finishBrowser = resolve)));
+    const signingIn = google.signIn();
+    await waitUntil(() => openAuthSession.mock.calls.length > 0);
+    finishBrowser({ type: 'dismiss' });
+    await new Promise((r) => setTimeout(r, 5));
+    const viaRoute = google.completeFromParams({ code: 'late-code' });
+
+    const [a, b] = await Promise.all([signingIn, viaRoute]);
+    expect(a).toMatchObject({ type: 'success' });
+    expect(b).toEqual(a);
+    expect(exchange).toHaveBeenCalledTimes(1);
+    expect(exchange).toHaveBeenCalledWith('late-code', undefined);
+  });
+
+  test('Android: deep link arriving before "dismiss" is used instead of cancelling', async () => {
+    let finishBrowser!: (r: BrowserResult) => void;
+    const { google, exchange, openAuthSession } = setup();
+    openAuthSession.mockImplementation(() => new Promise((resolve) => (finishBrowser = resolve)));
+    const signingIn = google.signIn();
+    await waitUntil(() => openAuthSession.mock.calls.length > 0);
+    const viaRoute = google.completeFromParams({ code: 'early-code' });
+    finishBrowser({ type: 'dismiss' });
+    await expect(signingIn).resolves.toMatchObject({ type: 'success' });
+    await viaRoute;
+    expect(exchange).toHaveBeenCalledTimes(1);
+  });
+
+  test('a provider error delivered by deep link after "dismiss" is reported, not swallowed', async () => {
+    let finishBrowser!: (r: BrowserResult) => void;
+    const { google, openAuthSession } = setup();
+    openAuthSession.mockImplementation(() => new Promise((resolve) => (finishBrowser = resolve)));
+    const signingIn = google.signIn();
+    await waitUntil(() => openAuthSession.mock.calls.length > 0);
+    finishBrowser({ type: 'dismiss' });
+    await new Promise((r) => setTimeout(r, 5));
+    google.completeFromParams({ error: 'server_error' }).catch(() => undefined);
+    expect((await rejection(signingIn)).code).toBe('PROVIDER_ERROR');
   });
 
   test('declining on the Google consent screen is a cancellation', async () => {

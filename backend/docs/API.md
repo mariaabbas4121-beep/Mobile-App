@@ -1,11 +1,12 @@
 # NeighborShare API reference (v1)
 
-This is the contract the mobile app integrates against. Everything here is implemented and covered by tests; anything not listed (phone or identity verification) does not exist yet. Google sign-in has no endpoint here: the app completes it with Supabase Auth and then uses the resulting access token with these endpoints like any other.
+This is the contract the mobile app integrates against. Everything here is implemented and covered by tests; anything not listed (identity verification) does not exist yet. Google sign-in has no endpoint here: the app completes it with Supabase Auth and then uses the resulting access token with these endpoints like any other.
 
 - [Conventions](#conventions)
 - [Health](#health)
 - [Auth](#auth): [signup](#post-apiv1authsignup), [login](#post-apiv1authlogin), [refresh](#post-apiv1authrefresh), [resend confirmation](#post-apiv1authemailresend), [logout](#post-apiv1authlogout), [me](#get-apiv1authme), [status](#get-apiv1authstatus)
 - [Profile](#profile): [update](#patch-apiv1profileme)
+- [Phone verification](#phone-verification): [status](#get-apiv1verificationphone), [start](#post-apiv1verificationphonestart), [resend](#post-apiv1verificationphoneresend), [confirm](#post-apiv1verificationphoneconfirm)
 - [Email confirmation flow](#email-confirmation-flow)
 - [Error codes](#error-codes)
 - [Rate limits](#rate-limits)
@@ -234,7 +235,7 @@ Resends the signup confirmation email.
 - **`accountStatus` is separate from `stage`.** A suspended user can be at any stage.
 - **`missingFields`** uses API field names: `displayName`, `city`, `neighborhood`.
 
-Phone and identity verification have no provider yet, so for now they always report `not_started`.
+Phone verification is reported from the server's records once the [phone verification](#phone-verification) flow completes. Identity verification has no provider yet and always reports `not_started`.
 
 ## Profile
 
@@ -259,6 +260,131 @@ Blank strings and control characters are rejected.
 
 The database enforces the same rules independently: users can write only these four columns, only on their own row, and only while active or restricted.
 
+## Phone verification
+
+An **extra verification step on an existing, signed-in account**. It is not a sign-in method and does not replace email/password or Google. Supabase Auth's phone-change flow sends and checks the code; the API never generates, stores or logs an OTP.
+
+How a number becomes `verified`:
+
+1. `start`: the API asks Supabase Auth, **with the caller's own access token**, to change that user's phone. Supabase texts a code to the new number and records it as a pending change on that user only.
+2. `confirm`: the API checks that Supabase is waiting for exactly this number **for this user**, then has Supabase verify the code. Supabase signs the user in as a side effect; the API revokes that extra session immediately and never returns it.
+3. The API reads the user from Supabase Auth again with the caller's token. Only if it is the same user, with this number as their phone and a `phone_confirmed_at`, does the server record `verified`, and only for a number a code was requested for through this API.
+
+Nothing the client sends (a status, a `verified` flag, a user id) can set the result: unknown fields are rejected with `400`, and the database lets only the server write these records.
+
+**`PhoneVerification` object** (numbers are masked; the API never returns the full number):
+
+```json
+{
+  "status": "pending",
+  "verifiedAt": null,
+  "phone": null,
+  "pendingPhone": "+92••••••4567",
+  "resendAvailableAt": "2026-10-26T12:01:00.000Z",
+  "codeLength": 6
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `not_started`, `pending`, `verified`, `rejected`, `expired` or `revoked` |
+| `verifiedAt` | When Supabase confirmed the number; only while `verified` |
+| `phone` | The verified number, masked; only while `verified` |
+| `pendingPhone` | The number a code was last requested for, masked, or `null` |
+| `resendAvailableAt` | Earliest time the API will send another code, or `null` if it would now |
+| `codeLength` | Digits in the SMS code (`PHONE_OTP_LENGTH`; must match Supabase) |
+
+**Status transitions**
+
+| Event | Result |
+| --- | --- |
+| Code requested, number not yet verified | `not_started` / `rejected` / `expired` / `revoked` → `pending` |
+| Code requested while another number is verified | Stays `verified` with the old number; `pendingPhone` set. The old number stays verified until the new one is confirmed (Supabase also keeps it until then) |
+| Correct code | → `verified` with the new number; `pendingPhone` cleared |
+| Wrong, expired or reused code | No change (an audit event is written) |
+| Supabase no longer reports the verified number as this user's confirmed phone (e.g. changed directly in Supabase) | `verified` → `revoked` on the next `GET /verification/phone` |
+| Another account later verifies the same number (Supabase allows a number on one user at a time) | The stale claim on the other account becomes `revoked` |
+
+Account status: start, resend and confirm need `active` or `restricted` (same rule as profile edits). Reading the status works for any account status. Phone verification is **not required** to use the app.
+
+### `GET /api/v1/verification/phone`
+
+**Auth required.** **`200`** → `{ "verification": PhoneVerification }`
+
+**Errors:** `401`, `503 AUTH_UNAVAILABLE`, `503 DATABASE_UNAVAILABLE`, `503 SERVER_NOT_CONFIGURED` (no `SUPABASE_SECRET_KEY`).
+
+### `POST /api/v1/verification/phone/start`
+
+**Auth required.** Account must be `active` or `restricted`.
+
+**Body:** `{ "phone": "+923001234567" }`, an international number. Spaces, dashes, dots, brackets and a leading `00` are accepted and normalised to E.164 (`+`, country code, 8–15 digits in total). No other fields are allowed.
+
+**Responses**
+
+- `202`: Supabase accepted the request. **This does not prove the SMS was delivered**:
+
+  ```json
+  {
+    "success": true,
+    "data": {
+      "codeSent": true,
+      "message": "If this number can receive text messages, a verification code is on its way.",
+      "verification": { "status": "pending", "pendingPhone": "+92••••••4567", "resendAvailableAt": "…", "codeLength": 6, "verifiedAt": null, "phone": null }
+    }
+  }
+  ```
+
+  A number that belongs to **another account** gets this same `202` response (no SMS is sent, and confirming fails like a wrong code), so the endpoint cannot be used to find out who owns a number.
+
+- `200`: `{ "codeSent": false, "verification": { "status": "verified", … } }`. The number is already verified on this account; nothing is sent.
+
+**Errors**
+
+| Status | `code` | Meaning |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | Malformed number, or extra fields |
+| 400 | `INVALID_PHONE` | Supabase refused the number |
+| 400 | `PHONE_COUNTRY_NOT_SUPPORTED` | Outside `PHONE_ALLOWED_COUNTRY_CODES` |
+| 403 | `ACCOUNT_SUSPENDED`, `ACCOUNT_DELETION_PENDING` | Account status |
+| 409 | `PHONE_ALREADY_ON_ACCOUNT` | Supabase already has this number confirmed on this account, but it was never requested through this API (e.g. set directly in Supabase). Use another number or contact support |
+| 429 | `RATE_LIMITED` | Hourly limits, Supabase's SMS limit, or the resend cooldown (`details.reason: "resend_cooldown"`); see `Retry-After` |
+| 502 | `AUTH_PROVIDER_ERROR` | Supabase answered in an unexpected way |
+| 503 | `PHONE_VERIFICATION_NOT_CONFIGURED` | A setup problem; retrying will not help. `details.reason` is `phone_provider_disabled` (Phone provider off in Supabase), `phone_confirmations_disabled` (numbers would be accepted without a code, so the API refuses) or `database_migration_missing` (phone verification migration not applied). Also returned by `GET /verification/phone` for a missing migration |
+| 503 | `SMS_DELIVERY_UNAVAILABLE` | Supabase or its SMS provider could not send. The user can retry at once |
+| 503 | `AUTH_UNAVAILABLE`, `DATABASE_UNAVAILABLE`, `SERVER_NOT_CONFIGURED` | Outages or missing server configuration |
+
+### `POST /api/v1/verification/phone/resend`
+
+**Auth required.** Account must be `active` or `restricted`. **Body:** none, or `{}`. Sends a new code to the pending number; it never accepts a different number (use `start` for that).
+
+**Responses and errors:** as for `start`, plus `409 NO_PENDING_PHONE_VERIFICATION` when no code has been requested.
+
+### `POST /api/v1/verification/phone/confirm`
+
+**Auth required.** Account must be `active` or `restricted`.
+
+**Body:** `{ "phone": "+923001234567", "code": "123456" }`. `phone` is the number the code was requested for (same normalisation as `start`); `code` is 6–10 digits.
+
+**`200`** → `{ "verification": PhoneVerification }` with `status: "verified"`. Repeating a confirmation that already succeeded returns the same `200` without contacting Supabase.
+
+**Errors**
+
+| Status | `code` | Meaning |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | Malformed number or code, or extra fields |
+| 400 | `OTP_INVALID_OR_EXPIRED` | Wrong, expired or already used code. Supabase does not distinguish these. The status does not change |
+| 409 | `NO_PENDING_PHONE_VERIFICATION` | No code was requested for this number on this account (or it was replaced by a newer request) |
+| 403 | `ACCOUNT_SUSPENDED`, `ACCOUNT_DELETION_PENDING` | Account status |
+| 429 | `RATE_LIMITED` | Too many attempts (per IP and per account), or Supabase's verification limit |
+| 502 | `AUTH_PROVIDER_ERROR` | Supabase accepted the code but did not then report the number as confirmed; nothing is recorded |
+| 503 | `AUTH_UNAVAILABLE`, `DATABASE_UNAVAILABLE`, `SERVER_NOT_CONFIGURED` | Outages. If Supabase accepted the code but the database write failed, retrying `confirm` (any code) completes it from Supabase's record |
+
+**Codes expire quickly.** On the hosted Supabase project the SMS code is valid for 60 seconds by default (Authentication → Providers → Phone → SMS OTP Expiry). Apps should let the user resend once `resendAvailableAt` has passed.
+
+### Requiring phone verification later
+
+Nothing requires a verified phone today. To require it for a high-trust action (for example creating a listing or requesting an item), add a guard after `requireAuth` that reads the caller's phone record and refuses with `403` unless `status` is `verified`, and document the new error code here. That policy has not been decided, so no guard exists.
+
 ## Email confirmation flow
 
 1. The app calls `POST /auth/signup` and shows the `202` message.
@@ -277,6 +403,11 @@ The API has no endpoint for step 2: Supabase handles the link itself. How the mo
 | 400 | `BAD_REQUEST` | Other malformed requests |
 | 400 | `INVALID_EMAIL` | Signup: Supabase refused the address |
 | 400 | `INVALID_PROFILE` | Profile: a database constraint refused a value |
+| 400 | `INVALID_PHONE` | Phone start: Supabase refused the number |
+| 400 | `PHONE_COUNTRY_NOT_SUPPORTED` | Phone start: country not allowed |
+| 400 | `OTP_INVALID_OR_EXPIRED` | Phone confirm: wrong, expired or used code |
+| 409 | `PHONE_ALREADY_ON_ACCOUNT` | Phone start: number already confirmed in Supabase but not through this API |
+| 409 | `NO_PENDING_PHONE_VERIFICATION` | Phone resend/confirm: no matching code request |
 | 401 | `UNAUTHENTICATED` | No `Authorization` header |
 | 401 | `INVALID_TOKEN` | Bad, expired or revoked access token |
 | 401 | `INVALID_CREDENTIALS` | Login |
@@ -295,7 +426,9 @@ The API has no endpoint for step 2: Supabase handles the link itself. How the mo
 | 429 | `RATE_LIMITED` | This API's limits or Supabase's own; see `Retry-After` |
 | 500 | `INTERNAL_ERROR` | Unexpected server error (logged with the `requestId`) |
 | 500 | `PROFILE_MISSING` | Account exists without a profile (should not happen) |
-| 502 | `AUTH_PROVIDER_ERROR` | Supabase returned an error the API does not recognise |
+| 502 | `AUTH_PROVIDER_ERROR` | Supabase returned an error or result the API does not recognise |
+| 503 | `PHONE_VERIFICATION_NOT_CONFIGURED` | Phone verification endpoints: Supabase or database not set up; `details.reason` says which |
+| 503 | `SMS_DELIVERY_UNAVAILABLE` | Supabase or its SMS provider could not send the code |
 | 503 | `AUTH_UNAVAILABLE` | Supabase Auth unreachable, failing, or slower than 12 s |
 | 503 | `DATABASE_UNAVAILABLE` | Database query failed |
 | 503 | `EMAIL_DELIVERY_UNAVAILABLE` | Supabase cannot send email (custom SMTP not configured) |
@@ -313,5 +446,13 @@ Limits are per API process. Several instances behind a load balancer need a shar
 | `POST /auth/refresh` | 60 / 15 min | Client IP |
 | `POST /auth/email/resend` | 10 / hour | Client IP |
 | `POST /auth/email/resend` | 3 / hour | Account (email) |
+| `POST /verification/phone/start` | 10 / hour | Client IP |
+| `POST /verification/phone/start` | 5 / hour | Account (signed-in user) |
+| `POST /verification/phone/start` | 5 / hour | Destination number (across all accounts) |
+| `POST /verification/phone/resend` | 10 / hour | Client IP |
+| `POST /verification/phone/resend` | 5 / hour | Account |
+| `POST /verification/phone/confirm` | 30 / 15 min | Client IP |
+| `POST /verification/phone/confirm` | 10 / 15 min | Account |
+| Phone start + resend | 1 SMS per `PHONE_OTP_RESEND_COOLDOWN_SECONDS` (default 60 s) | Account; **stored in the database**, so it holds across API instances and makes double taps safe |
 
-IPv6 clients are grouped by /56. Behind a reverse proxy, set `TRUST_PROXY_HOPS` so the real client IP is used. Supabase applies its own limits as well (notably on sending email); those also surface as `429 RATE_LIMITED`.
+IPv6 clients are grouped by /56. Behind a reverse proxy, set `TRUST_PROXY_HOPS` so the real client IP is used. Supabase applies its own limits as well (notably on sending email and SMS, and on OTP verifications per IP); those also surface as `429 RATE_LIMITED`. Phone limits are keyed by a hash of the user id or number, never the raw value, and never include the code.

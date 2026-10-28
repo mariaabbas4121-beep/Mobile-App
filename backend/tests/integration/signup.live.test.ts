@@ -17,13 +17,24 @@ let config: Config;
 let app: Express;
 let admin: SupabaseClient;
 let users: TestUsers;
+let confirmEmailOff = false;
 
-beforeAll(() => {
+beforeAll(async () => {
   config = integrationConfig();
   app = liveApp(config);
   admin = adminClient(config);
   users = new TestUsers(admin);
+  const res = await fetch(`${config.supabase.url}/auth/v1/settings`, { headers: { apikey: config.supabase.publishableKey } });
+  confirmEmailOff = ((await res.json()) as { mailer_autoconfirm?: boolean }).mailer_autoconfirm === true;
 });
+
+// These tests describe the production setting (Confirm email on). With it off,
+// Supabase answers duplicates with "already registered" and accepts addresses
+// it would otherwise refuse, so they are skipped, never reported as passed.
+const CONFIRM_EMAIL_OFF_HINT = 'Confirm email is off in this Supabase project (mailer_autoconfirm); turn it on to run this test';
+const skipIfConfirmEmailOff = (ctx: { skip: (note?: string) => never }) => {
+  if (confirmEmailOff) ctx.skip(CONFIRM_EMAIL_OFF_HINT);
+};
 
 afterAll(async () => {
   await users?.cleanup();
@@ -61,6 +72,7 @@ async function rowCounts(userId: string) {
 
 describe('duplicate registration (live)', () => {
   test('signing up an existing confirmed email returns the generic 202 and creates nothing', async (ctx) => {
+    skipIfConfirmEmailOff(ctx);
     const existing = await users.create({ confirmed: true, displayName: 'Original' });
     const res = await request(app).post('/api/v1/auth/signup').send({ email: existing.email, password: 'Another-pass-1', displayName: 'Imposter' });
     skipIfSupabaseLimited(ctx, res);
@@ -80,6 +92,7 @@ describe('duplicate registration (live)', () => {
   });
 
   test('concurrent duplicate signups stay consistent', async (ctx) => {
+    skipIfConfirmEmailOff(ctx);
     const existing = await users.create({ confirmed: true });
     const responses = await Promise.all(
       Array.from({ length: 5 }, () =>
@@ -96,14 +109,38 @@ describe('duplicate registration (live)', () => {
 
 describe('Supabase-side validation (live)', () => {
   test('an address Supabase refuses is reported as a clean 400, with no user created', async (ctx) => {
+    skipIfConfirmEmailOff(ctx);
     const email = TestUsers.email(); // reserved .test domain
     const res = await request(app).post('/api/v1/auth/signup').send({ email, password: 'Valid-pass-123' });
-    expect(await usersWithEmail(email)).toHaveLength(0);
+    // Removed in afterAll even if Supabase unexpectedly accepted the address.
+    const created = await usersWithEmail(email);
+    for (const u of created) users.track(u.id);
+    expect(created).toHaveLength(0);
     skipIfSupabaseLimited(ctx, res);
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_EMAIL');
     expect(Object.keys(res.body).sort()).toEqual(['code', 'message', 'requestId', 'success']);
     expect(await usersWithEmail(email)).toHaveLength(0);
+  });
+});
+
+describe('signup with Confirm email off (live, development setting)', () => {
+  test('returns 201 with a session that works at once, and provisions the profile', async (ctx) => {
+    if (!confirmEmailOff) ctx.skip('Confirm email is on in this project; the 202 path is covered above');
+    const email = TestUsers.email();
+    const res = await request(app).post('/api/v1/auth/signup').send({ email, password: TestUsers.password(), displayName: 'Instant' });
+    for (const u of await usersWithEmail(email)) users.track(u.id);
+    skipIfSupabaseLimited(ctx, res);
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.emailConfirmationRequired).toBe(false);
+    const token = res.body.data.session.accessToken as string;
+    const me = await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${token}`);
+    expect(me.status).toBe(200);
+    expect(me.body.data.profile.displayName).toBe('Instant');
+    const status = await request(app).get('/api/v1/auth/status').set('Authorization', `Bearer ${token}`);
+    expect(status.body.data.milestones.email_verified).toBe(true);
+    expect(status.body.data.profile.complete).toBe(false);
   });
 });
 

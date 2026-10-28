@@ -52,6 +52,7 @@ function RootNavigator() {
         <Stack.Screen name="qr/[txnId]" options={{ presentation: 'modal' }} />
         <Stack.Screen name="teach/[txnId]" options={{ presentation: 'modal' }} />
         <Stack.Screen name="lend/new" options={{ presentation: 'modal' }} />
+        <Stack.Screen name="verify/phone" options={{ presentation: 'card' }} />
       </Stack.Protected>
     </Stack>
   );

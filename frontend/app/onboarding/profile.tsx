@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import type { TextInput } from 'react-native';
+import type { TextInputInstance } from 'react-native';
 import { useAuth } from '../../context/AuthContext';
 import { errorMessage, fieldErrorsFrom } from '../../lib/auth/messages';
 import { displayNameError, profileTextError } from '../../lib/auth/validation';
@@ -22,9 +22,9 @@ export default function CompleteProfileScreen() {
   });
   const [errors, setErrors] = useState<Partial<Form>>({});
   const [formError, setFormError] = useState<string | null>(null);
-  const cityRef = useRef<TextInput>(null);
-  const areaRef = useRef<TextInput>(null);
-  const bioRef = useRef<TextInput>(null);
+  const cityRef = useRef<TextInputInstance>(null);
+  const areaRef = useRef<TextInputInstance>(null);
+  const bioRef = useRef<TextInputInstance>(null);
 
   const set = (key: keyof Form) => (v: string) => {
     setForm((f) => ({ ...f, [key]: v }));

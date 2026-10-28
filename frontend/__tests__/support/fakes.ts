@@ -1,5 +1,5 @@
 import { ApiError, type ApiClient } from '../../lib/api/client';
-import type { OnboardingStatus, Profile, Session, User } from '../../lib/api/types';
+import type { OnboardingStatus, PhoneVerification, Profile, Session, User } from '../../lib/api/types';
 import { SessionManager } from '../../lib/auth/sessionManager';
 import { createMemoryTokenStorage, type TokenStorage } from '../../lib/auth/tokenStorage';
 import type { GoogleAuth } from '../../lib/auth/googleAuth';
@@ -68,11 +68,38 @@ export function fakeApi(): FakeApi {
     refresh: jest.fn(async () => ({ user, session: session(2) })),
     resendConfirmation: jest.fn(async () => ({ message: 'generic' })),
     logout: jest.fn(async () => undefined),
+    health: jest.fn(async () => ({ status: 'ok' })),
     me: jest.fn(async () => ({ user, profile: profile() })),
     status: jest.fn(async () => onboarding()),
     updateProfile: jest.fn(async () => ({ profile: profile() })),
+    phoneVerification: jest.fn(async () => ({ verification: phoneVerification() })),
+    startPhoneVerification: jest.fn(async () => ({
+      verification: phoneVerification({ status: 'pending', pendingPhone: '+92••••••4567', resendAvailableAt: inSeconds(60) }),
+      codeSent: true,
+      message: 'If this number can receive text messages, a verification code is on its way.',
+    })),
+    resendPhoneVerification: jest.fn(async () => ({
+      verification: phoneVerification({ status: 'pending', pendingPhone: '+92••••••4567', resendAvailableAt: inSeconds(60) }),
+      codeSent: true,
+      message: 'If this number can receive text messages, a verification code is on its way.',
+    })),
+    confirmPhoneVerification: jest.fn(async () => ({
+      verification: phoneVerification({ status: 'verified', verifiedAt: '2026-10-26T12:00:00Z', phone: '+92••••••4567' }),
+    })),
   };
 }
+
+const inSeconds = (s: number) => new Date(Date.now() + s * 1000).toISOString();
+
+export const phoneVerification = (overrides: Partial<PhoneVerification> = {}): PhoneVerification => ({
+  status: 'not_started',
+  verifiedAt: null,
+  phone: null,
+  pendingPhone: null,
+  resendAvailableAt: null,
+  codeLength: 6,
+  ...overrides,
+});
 
 export function fakeGoogle(overrides: Partial<{ [K in keyof GoogleAuth]: jest.Mock }> = {}) {
   return {

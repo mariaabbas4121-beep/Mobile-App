@@ -58,6 +58,24 @@ const envSchema = z
     AUTH_EMAIL_REDIRECT_URL: z.preprocess(emptyToUndefined, httpUrlOrDeepLink().optional()),
     // Where Google OAuth returns after consent. Same dashboard allow-list rule.
     AUTH_OAUTH_REDIRECT_URL: z.preprocess(emptyToUndefined, httpUrlOrDeepLink().optional()),
+
+    // Phone verification. The cooldown must be at least Supabase's "SMS max
+    // frequency" (Auth -> Rate Limits), or Supabase refuses some resends.
+    PHONE_OTP_RESEND_COOLDOWN_SECONDS: z.preprocess(emptyToUndefined, z.coerce.number().int().min(30).max(3600).default(60)),
+    // Must match the "SMS OTP length" set in Supabase (Auth -> Providers -> Phone).
+    PHONE_OTP_LENGTH: z.preprocess(emptyToUndefined, z.coerce.number().int().min(6).max(10).default(6)),
+    // Comma-separated country calling codes SMS may be sent to (e.g. "92").
+    // Empty allows every country; limiting it reduces SMS-pumping fraud.
+    PHONE_ALLOWED_COUNTRY_CODES: z
+      .string()
+      .default('')
+      .transform((v) =>
+        v
+          .split(',')
+          .map((s) => s.trim().replace(/^\+/, ''))
+          .filter(Boolean),
+      )
+      .pipe(z.array(z.string().regex(/^[1-9][0-9]{0,2}$/, { error: 'must be country calling codes such as 92,971' }))),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && !env.SUPABASE_URL.startsWith('https://')) {
@@ -98,6 +116,12 @@ export interface Config {
   auth: {
     emailRedirectUrl: string | undefined;
     oauthRedirectUrl: string | undefined;
+  };
+  phoneVerification: {
+    resendCooldownSeconds: number;
+    otpLength: number;
+    // Calling codes without "+"; empty means any.
+    allowedCountryCodes: string[];
   };
 }
 
@@ -142,6 +166,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     auth: {
       emailRedirectUrl: e.AUTH_EMAIL_REDIRECT_URL,
       oauthRedirectUrl: e.AUTH_OAUTH_REDIRECT_URL,
+    },
+    phoneVerification: {
+      resendCooldownSeconds: e.PHONE_OTP_RESEND_COOLDOWN_SECONDS,
+      otpLength: e.PHONE_OTP_LENGTH,
+      allowedCountryCodes: e.PHONE_ALLOWED_COUNTRY_CODES,
     },
   };
 }

@@ -12,6 +12,13 @@ import type {
   ProfileRepository,
   Verification,
 } from '../src/auth/auth.types.js';
+import type {
+  AuthPhoneState,
+  PhoneAuthProvider,
+  PhoneRecord,
+  PhoneVerificationStore,
+} from '../src/verification/phone.types.js';
+import { createPhoneVerificationService } from '../src/verification/phone-verification.service.js';
 
 // Fake, syntactically valid configuration for unit tests. It points at an
 // unroutable host and contains no real key.
@@ -28,6 +35,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
       secretKey: undefined,
     },
     auth: { emailRedirectUrl: undefined, oauthRedirectUrl: undefined },
+    phoneVerification: { resendCooldownSeconds: 60, otpLength: 6, allowedCountryCodes: [] },
     ...overrides,
   };
 }
@@ -122,15 +130,131 @@ function stripUndefined<T extends object>(o: T): Partial<{ [K in keyof T]: Exclu
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as never;
 }
 
-export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPolicy } = {}) {
+// --- Phone verification fakes ----------------------------------------------
+// A small model of Supabase Auth's phone-change flow: a user asks for a new
+// number, Auth "sends" FAKE_OTP and records it as new_phone, and verifying
+// that code moves it to phone with phone_confirmed_at. No SMS is involved.
+export const FAKE_OTP = '246810';
+
+interface FakeAuthUser {
+  id: string;
+  token: string;
+  phone: string | null;
+  phoneConfirmedAt: string | null;
+  pendingPhone: string | null;
+  otp: string | null;
+}
+
+export function fakePhoneAuth() {
+  const users = new Map<string, FakeAuthUser>([
+    [userA.id, { id: userA.id, token: VALID_TOKEN, phone: null, phoneConfirmedAt: null, pendingPhone: null, otp: null }],
+  ]);
+  const byToken = (token: string) => {
+    const u = [...users.values()].find((x) => x.token === token);
+    if (!u) throw AppError.unauthenticated('Access token is invalid or expired', 'INVALID_TOKEN');
+    return u;
+  };
+  const toState = (u: FakeAuthUser): AuthPhoneState => ({
+    userId: u.id,
+    phone: u.phone,
+    phoneConfirmedAt: u.phoneConfirmedAt,
+    pendingPhone: u.pendingPhone,
+  });
+
+  const fake = {
+    users,
+    addUser(id: string, token: string, phone: string | null = null) {
+      users.set(id, { id, token, phone, phoneConfirmedAt: phone ? '2026-10-01T00:00:00Z' : null, pendingPhone: null, otp: null });
+    },
+    getSettings: vi.fn<PhoneAuthProvider['getSettings']>(async () => ({ phoneEnabled: true, autoconfirm: false })),
+    getPhoneState: vi.fn<PhoneAuthProvider['getPhoneState']>(async (token) => toState(byToken(token))),
+    requestPhoneChange: vi.fn<PhoneAuthProvider['requestPhoneChange']>(async (token, phone) => {
+      const u = byToken(token);
+      if ([...users.values()].some((x) => x.id !== u.id && x.phone === phone)) {
+        throw AppError.conflict('PHONE_IN_USE', 'Phone number belongs to another account');
+      }
+      u.pendingPhone = phone;
+      u.otp = FAKE_OTP;
+      return toState(u);
+    }),
+    verifyPhoneChange: vi.fn<PhoneAuthProvider['verifyPhoneChange']>(async (phone, code) => {
+      const u = [...users.values()].find((x) => x.pendingPhone === phone);
+      if (!u || u.otp !== code) throw AppError.badRequest('OTP_INVALID_OR_EXPIRED', 'The code is incorrect or has expired');
+      u.phone = phone;
+      u.phoneConfirmedAt = '2026-10-26T12:00:00Z';
+      u.pendingPhone = null;
+      u.otp = null;
+      return { userId: u.id };
+    }),
+  };
+  return fake;
+}
+
+// In-memory stand-in for the phone_verification_* database functions, with
+// the same rules (cooldown, completion only for the requested number).
+export function memoryPhoneStore(now: () => number = Date.now) {
+  const rows = new Map<string, PhoneRecord>();
+  const row = (userId: string): PhoneRecord => {
+    let r = rows.get(userId);
+    if (!r) {
+      r = { status: 'not_started', verifiedAt: null, phone: null, phoneVerifiedAt: null, pendingPhone: null, otpSentAt: null };
+      rows.set(userId, r);
+    }
+    return r;
+  };
+  const store = {
+    rows,
+    get: vi.fn<PhoneVerificationStore['get']>(async (userId) => ({ ...row(userId) })),
+    reserveSend: vi.fn<PhoneVerificationStore['reserveSend']>(async (userId, cooldown) => {
+      const r = row(userId);
+      if (r.otpSentAt) {
+        const remaining = Math.ceil(cooldown - (now() - Date.parse(r.otpSentAt)) / 1000);
+        if (remaining > 0) return remaining;
+      }
+      r.otpSentAt = new Date(now()).toISOString();
+      return 0;
+    }),
+    releaseSend: vi.fn<PhoneVerificationStore['releaseSend']>(async (userId) => {
+      row(userId).otpSentAt = null;
+    }),
+    markPending: vi.fn<PhoneVerificationStore['markPending']>(async (userId, phone) => {
+      const r = row(userId);
+      r.pendingPhone = phone;
+      if (r.status !== 'verified') r.status = 'pending';
+    }),
+    complete: vi.fn<PhoneVerificationStore['complete']>(async (userId, phone, verifiedAt) => {
+      const r = row(userId);
+      if (r.pendingPhone !== phone) throw AppError.conflict('NO_PENDING_PHONE_VERIFICATION', 'Request a new code for this number first');
+      Object.assign(r, { status: 'verified', verifiedAt, phone, phoneVerifiedAt: verifiedAt, pendingPhone: null, otpSentAt: null });
+    }),
+    recordFailure: vi.fn<PhoneVerificationStore['recordFailure']>(async () => undefined),
+    revoke: vi.fn<PhoneVerificationStore['revoke']>(async (userId) => {
+      const r = row(userId);
+      if (r.status === 'verified') Object.assign(r, { status: 'revoked', phoneVerifiedAt: null });
+    }),
+  };
+  return store;
+}
+
+export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPolicy; now?: () => number } = {}) {
+  const config = overrides.config ?? testConfig();
   const gateway = fakeGateway();
   const profiles = fakeProfiles();
+  const phoneAuth = fakePhoneAuth();
+  const phoneStore = memoryPhoneStore(overrides.now);
   const app = createApp({
-    config: overrides.config ?? testConfig(),
+    config,
     logger: silentLogger,
     authGateway: gateway,
     profiles,
+    phoneVerification: createPhoneVerificationService({
+      auth: phoneAuth,
+      store: phoneStore,
+      policy: config.phoneVerification,
+      logger: silentLogger,
+      ...(overrides.now ? { now: overrides.now } : {}),
+    }),
     ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
   });
-  return { app, gateway, profiles };
+  return { app, gateway, profiles, phoneAuth, phoneStore };
 }

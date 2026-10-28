@@ -4,13 +4,16 @@ export class AppError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details: unknown;
+  // Sent as the Retry-After header when set.
+  readonly retryAfterSeconds: number | undefined;
 
-  constructor(status: number, code: string, message: string, details?: unknown) {
+  constructor(status: number, code: string, message: string, details?: unknown, retryAfterSeconds?: number) {
     super(message);
     this.name = 'AppError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 
   static badRequest(code: string, message: string, details?: unknown) {
@@ -35,8 +38,8 @@ export class AppError extends Error {
     return new AppError(409, code, message);
   }
 
-  static rateLimited(message = 'Too many requests, please try again later') {
-    return new AppError(429, 'RATE_LIMITED', message);
+  static rateLimited(message = 'Too many requests, please try again later', retryAfterSeconds?: number, details?: unknown) {
+    return new AppError(429, 'RATE_LIMITED', message, details, retryAfterSeconds);
   }
 
   static unavailable(message = 'Service temporarily unavailable', code = 'SERVICE_UNAVAILABLE') {

@@ -101,7 +101,7 @@ export default function ActivityScreen() {
               <View style={styles.activeDot} />
               <Text style={styles.sectionTitle}>Active ({active.length})</Text>
             </View>
-          ) : null
+          ) : undefined
         }
         ItemSeparatorComponent={() => <View style={{ height: Spacing.md }} />}
         ListEmptyComponent={

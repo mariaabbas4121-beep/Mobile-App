@@ -3,6 +3,7 @@ import type { Config } from '../config/env.js';
 import type { SupabaseClients } from '../config/supabase.js';
 import type { Logger } from '../lib/logger.js';
 import { AppError } from '../lib/errors.js';
+import { timed } from '../lib/timing.js';
 import { mapAuthError } from './auth.errors.js';
 import type { AuthGateway, AuthSession, AuthUser } from './auth.types.js';
 
@@ -32,7 +33,7 @@ export function toAuthSession(session: Session): AuthSession {
 // ~30 s when Supabase is unreachable. The API gives up sooner and reports 503.
 export const AUTH_OPERATION_DEADLINE_MS = 12_000;
 
-function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+export function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(
@@ -53,18 +54,21 @@ export function createSupabaseAuthGateway(
 ): AuthGateway {
   const deadlineMs = options.deadlineMs ?? AUTH_OPERATION_DEADLINE_MS;
   const rawAuth = () => clients.anon().auth;
-  // Every auth-js call goes through the deadline.
+  // Every auth-js call goes through the deadline and is timed (name and
+  // duration only; arguments carry passwords and tokens).
+  const call = <T>(operation: string, work: () => Promise<T>) =>
+    timed(logger, `supabase_auth.${operation}`, () => withDeadline(work(), deadlineMs));
   const auth = () => {
     const a = rawAuth();
     return {
-      signUp: (...args: Parameters<typeof a.signUp>) => withDeadline(a.signUp(...args), deadlineMs),
+      signUp: (...args: Parameters<typeof a.signUp>) => call('sign_up', () => a.signUp(...args)),
       signInWithPassword: (...args: Parameters<typeof a.signInWithPassword>) =>
-        withDeadline(a.signInWithPassword(...args), deadlineMs),
-      refreshSession: (...args: Parameters<typeof a.refreshSession>) => withDeadline(a.refreshSession(...args), deadlineMs),
-      resend: (...args: Parameters<typeof a.resend>) => withDeadline(a.resend(...args), deadlineMs),
-      getUser: (...args: Parameters<typeof a.getUser>) => withDeadline(a.getUser(...args), deadlineMs),
+        call('sign_in_with_password', () => a.signInWithPassword(...args)),
+      refreshSession: (...args: Parameters<typeof a.refreshSession>) => call('refresh_session', () => a.refreshSession(...args)),
+      resend: (...args: Parameters<typeof a.resend>) => call('resend', () => a.resend(...args)),
+      getUser: (...args: Parameters<typeof a.getUser>) => call('get_user', () => a.getUser(...args)),
       admin: {
-        signOut: (...args: Parameters<typeof a.admin.signOut>) => withDeadline(a.admin.signOut(...args), deadlineMs),
+        signOut: (...args: Parameters<typeof a.admin.signOut>) => call('sign_out', () => a.admin.signOut(...args)),
       },
     };
   };

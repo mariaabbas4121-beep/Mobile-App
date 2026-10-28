@@ -45,7 +45,16 @@ export interface GoogleAuthDeps {
   redirectUrl: () => string;
   openAuthSession: (url: string, redirectUrl: string) => Promise<BrowserResult>;
   createSupabase: (url: string, key: string) => SupabaseClient;
+  // How long a "dismiss" waits for the redirect to arrive by deep link.
+  lateCallbackMs?: number;
+  // Development hint when the browser closed without returning to the app.
+  warn?: (message: string) => void;
 }
+
+// On Android, expo-web-browser reports "dismiss" as soon as the app becomes
+// active again, which can be just before the redirect's deep link is
+// delivered. The code then arrives through the callback route instead.
+const LATE_CALLBACK_MS = 2500;
 
 const MESSAGES = {
   notConfigured: 'Google sign-in is not set up in this build of the app.',
@@ -96,6 +105,8 @@ export function createGoogleAuth(deps: GoogleAuthDeps) {
   // One exchange per authorization code, however many times its callback
   // arrives (browser result and deep-link route can both deliver it).
   const exchanges = new Map<string, Promise<GoogleSignInResult>>();
+  // While a browser flow is open: receives callbacks that arrive by deep link.
+  let pendingFlow: { arrive: (result: Promise<GoogleSignInResult>) => void } | null = null;
 
   function supabase(): SupabaseClient {
     const { supabaseUrl, supabasePublishableKey } = deps.config;
@@ -105,6 +116,12 @@ export function createGoogleAuth(deps: GoogleAuthDeps) {
   }
 
   function completeFromParams(params: CallbackParams): Promise<GoogleSignInResult> {
+    const result = settleCallback(params);
+    pendingFlow?.arrive(result);
+    return result;
+  }
+
+  function settleCallback(params: CallbackParams): Promise<GoogleSignInResult> {
     const error = first(params.error);
     if (error) {
       // The user declined on Google's consent screen.
@@ -147,7 +164,16 @@ export function createGoogleAuth(deps: GoogleAuthDeps) {
   // Starts the browser flow. Repeated taps while one is open share it.
   function signIn(): Promise<GoogleSignInResult> {
     if (inFlight) return inFlight;
-    inFlight = (async () => {
+    let arrived: Promise<GoogleSignInResult> | null = null;
+    let onArrive: ((result: Promise<GoogleSignInResult>) => void) | null = null;
+    pendingFlow = {
+      arrive: (result) => {
+        arrived ??= result;
+        onArrive?.(result);
+      },
+    };
+
+    inFlight = (async (): Promise<GoogleSignInResult> => {
       const redirectTo = deps.redirectUrl();
       const { data, error } = await supabase().auth.signInWithOAuth({
         provider: 'google',
@@ -156,10 +182,30 @@ export function createGoogleAuth(deps: GoogleAuthDeps) {
       if (error || !data?.url) throw new OAuthError('PROVIDER_ERROR', MESSAGES.provider);
 
       const result = await deps.openAuthSession(data.url, redirectTo);
-      if (result.type !== 'success' || !result.url) return { type: 'cancelled' } as const;
-      return completeFromUrl(result.url);
+      if (result.type === 'success' && result.url) return completeFromUrl(result.url);
+      if (arrived) return arrived;
+      if (result.type !== 'dismiss') return { type: 'cancelled' };
+
+      return new Promise<GoogleSignInResult>((resolve) => {
+        const timer = setTimeout(() => {
+          onArrive = null;
+          // Also what happens when Supabase rejects the redirect URL: it
+          // sends the browser to the Site URL instead, and the app never
+          // hears back.
+          deps.warn?.(
+            `[auth] Google sign-in closed without returning to ${redirectTo}. If you finished signing in, ` +
+              'add this exact URL under Supabase -> Authentication -> URL Configuration -> Redirect URLs.',
+          );
+          resolve({ type: 'cancelled' });
+        }, deps.lateCallbackMs ?? LATE_CALLBACK_MS);
+        onArrive = (late) => {
+          clearTimeout(timer);
+          resolve(late);
+        };
+      });
     })().finally(() => {
       inFlight = null;
+      pendingFlow = null;
     });
     return inFlight;
   }

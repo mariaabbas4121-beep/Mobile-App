@@ -17,7 +17,7 @@ Supabase is the backend platform: Supabase Auth for accounts, PostgreSQL with Ro
 - The API implements email/password authentication (signup, email confirmation, login, refresh, logout), the current-user and onboarding-status endpoints, and profile editing, backed by Supabase with Row-Level Security. See [backend/docs/API.md](backend/docs/API.md).
 - The API needs a Supabase project to start: it validates its configuration at startup. The app does not.
 - The app signs users in through the API (email and password) or with Google via Supabase, keeps the session in secure device storage, and routes by account status. Google sign-in still needs its dashboard setup and a device test.
-- Phone verification and identity verification are not implemented yet.
+- Phone verification (an optional step from the Profile tab) is implemented in the API and the app using Supabase Auth's SMS codes. It needs a database migration and an SMS provider configured in Supabase before it can send texts; see [backend/docs/SUPABASE.md](backend/docs/SUPABASE.md#sms-setup-for-phone-verification). Identity verification is not implemented yet.
 
 ## Running locally
 

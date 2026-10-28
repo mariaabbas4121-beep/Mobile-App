@@ -58,6 +58,10 @@ export const errorHandler: ErrorRequestHandler = (err: unknown, req, res, _next)
   if (error.details !== undefined) body.details = error.details;
 
   if (res.headersSent) return;
+  // express-rate-limit sets its own Retry-After before calling next().
+  if (error.retryAfterSeconds !== undefined && !res.getHeader('Retry-After')) {
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil(error.retryAfterSeconds))));
+  }
   if (error.status === 401) {
     res.setHeader(
       'WWW-Authenticate',

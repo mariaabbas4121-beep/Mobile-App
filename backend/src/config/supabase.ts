@@ -6,7 +6,7 @@ import { AppError } from '../lib/errors.js';
 // cannot hold an API request open indefinitely.
 export const SUPABASE_REQUEST_TIMEOUT_MS = 10_000;
 
-const fetchWithTimeout: typeof fetch = (input, init) => {
+export const fetchWithTimeout: typeof fetch = (input, init) => {
   const timeout = AbortSignal.timeout(SUPABASE_REQUEST_TIMEOUT_MS);
   return fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout });
 };
@@ -24,6 +24,10 @@ export interface SupabaseClients {
   // Publishable key plus the caller's access token: database access runs as
   // that user, so Row-Level Security applies.
   forUser(accessToken: string): SupabaseClient;
+  // Publishable key, a new client each call: for Auth calls that return a
+  // session the server must not keep (e.g. verifyOtp). Nothing it stores
+  // outlives the request, and it never refreshes on its own.
+  ephemeral(): SupabaseClient;
   // Secret key: BYPASSES Row-Level Security. Only for server-side operations
   // whose authorization the backend has already checked.
   admin(): SupabaseClient;
@@ -44,6 +48,9 @@ export function createSupabaseClients(config: Pick<Config, 'supabase'>): Supabas
         ...serverAuthOptions,
         global: { ...serverAuthOptions.global, headers: { Authorization: `Bearer ${accessToken}` } },
       });
+    },
+    ephemeral() {
+      return createClient(url, publishableKey, serverAuthOptions);
     },
     admin() {
       if (!secretKey) {

@@ -5,6 +5,8 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
+import type { VerificationStatus } from '../../lib/api/types';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { Colors, Typography, Spacing, Radii, Shadows } from '../../utils/theme';
@@ -30,6 +32,16 @@ function TrustMeter({ score }: { score: number }) {
   );
 }
 
+// Labels for the phone status reported by GET /auth/status.
+const PHONE_STATUS: Record<VerificationStatus, { label: string; done: boolean }> = {
+  verified: { label: 'Verified', done: true },
+  pending: { label: 'Waiting for code', done: false },
+  not_started: { label: 'Not verified', done: false },
+  rejected: { label: 'Not verified', done: false },
+  expired: { label: 'Expired, verify again', done: false },
+  revoked: { label: 'Verify again', done: false },
+};
+
 const MENU_ITEMS = [
   { icon: 'cube-outline', label: 'My Listed Items', color: '#2e7d32' },
   { icon: 'star-outline', label: 'Reviews & Ratings', color: '#2e7d32' },
@@ -43,7 +55,10 @@ export default function ProfileScreen() {
   // Name, join date and account status come from the signed-in account;
   // the statistics below are still sample data.
   const { currentUser, transactions } = useApp();
-  const { profile, user, signOut } = useAuth();
+  const { profile, user, onboarding, signOut } = useAuth();
+  const router = useRouter();
+  const phone = PHONE_STATUS[onboarding?.verifications.phone.status ?? 'not_started'];
+  const openPhoneVerification = () => router.push('/verify/phone');
   const completedCount = transactions.filter(t => t.status === 'Completed').length;
 
   const profileName = profile?.displayName || user?.email || 'Your profile';
@@ -87,6 +102,28 @@ export default function ProfileScreen() {
               ))}
             </View>
           </SafeAreaView>
+        </View>
+
+        {/* Phone verification (status from the server) */}
+        <View style={styles.section}>
+          <TouchableOpacity
+            style={styles.phoneCard}
+            onPress={openPhoneVerification}
+            accessibilityRole="button"
+            accessibilityLabel={`Phone number: ${phone.label}`}
+            accessibilityHint={phone.done ? 'View or change your verified number' : 'Verify your phone number'}
+            activeOpacity={0.7}
+          >
+            <View style={[styles.menuIcon, { backgroundColor: phone.done ? '#e8f5e9' : '#fff7ed' }]}>
+              <Ionicons name={phone.done ? 'checkmark-circle' : 'call-outline'} size={18} color={phone.done ? '#2e7d32' : '#c2410c'} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.menuLabel}>Phone number</Text>
+              <Text style={styles.phoneStatus}>{phone.label}</Text>
+            </View>
+            {!phone.done && <Text style={styles.phoneAction}>Verify</Text>}
+            <Ionicons name="chevron-forward" size={16} color={Colors.slate} />
+          </TouchableOpacity>
         </View>
 
         {/* Trust Score Card */}
@@ -157,7 +194,13 @@ export default function ProfileScreen() {
               <TouchableOpacity
                 key={item.label}
                 style={[styles.menuItem, i < MENU_ITEMS.length - 1 && styles.menuItemBorder]}
-                onPress={item.label === 'Sign Out' ? confirmSignOut : undefined}
+                onPress={
+                  item.label === 'Sign Out'
+                    ? confirmSignOut
+                    : item.label === 'Verification Status'
+                      ? openPhoneVerification
+                      : undefined
+                }
                 accessibilityRole="button"
                 accessibilityLabel={item.label}
                 activeOpacity={0.7}
@@ -235,4 +278,11 @@ const styles = StyleSheet.create({
   menuItemBorder: { borderBottomWidth: 1, borderBottomColor: Colors.fog },
   menuIcon: { width: 36, height: 36, borderRadius: Radii.md, alignItems: 'center', justifyContent: 'center' },
   menuLabel: { flex: 1, fontSize: Typography.sizes.base, color: Colors.greenDark || '#1b5e20', fontWeight: Typography.weights.semibold },
+  phoneCard: {
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.md,
+    backgroundColor: Colors.white, borderRadius: Radii.xl, padding: Spacing.lg,
+    borderWidth: 1, borderColor: Colors.fog, ...Shadows.sm,
+  },
+  phoneStatus: { fontSize: Typography.sizes.xs, color: Colors.slate, marginTop: 2 },
+  phoneAction: { fontSize: Typography.sizes.sm, color: Colors.green || '#2e7d32', fontWeight: Typography.weights.bold },
 });

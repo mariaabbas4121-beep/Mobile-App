@@ -7,12 +7,14 @@ export function useSubmit<A extends unknown[]>(action: (...args: A) => Promise<v
   const mounted = useRef(true);
   const [busy, setBusy] = useState(false);
 
-  useEffect(
-    () => () => {
+  // Set on every mount: React may unmount and remount the same instance
+  // (Strict Mode), and a stale `false` would leave `busy` stuck on.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   const run = useCallback(
     async (...args: A) => {

@@ -1,6 +1,7 @@
 import type { SupabaseClients } from '../config/supabase.js';
 import type { Logger } from '../lib/logger.js';
 import { AppError } from '../lib/errors.js';
+import { timed } from '../lib/timing.js';
 import type { Profile, ProfileRepository, ProfileUpdate, Verification } from './auth.types.js';
 
 // API field -> column. Only these can be written by a user; the database's
@@ -67,25 +68,29 @@ export function createSupabaseProfileRepository(clients: SupabaseClients, logger
     return AppError.unavailable('Data service is temporarily unavailable', 'DATABASE_UNAVAILABLE');
   };
 
+  // Database calls are timed by name only; rows hold personal data.
+  const db = <T>(operation: string, query: PromiseLike<T>) => timed(logger, `database.${operation}`, async () => query);
+
   return {
     async getProfile(accessToken, userId) {
-      const { data, error } = await clients
-        .forUser(accessToken)
-        .from('profiles')
-        .select(PROFILE_COLUMNS)
-        .eq('id', userId)
-        .maybeSingle<ProfileRow>();
+      const { data, error } = await db(
+        'get_profile',
+        clients.forUser(accessToken).from('profiles').select(PROFILE_COLUMNS).eq('id', userId).maybeSingle<ProfileRow>(),
+      );
       if (error) throw fail('get_profile', error);
       return data ? toProfile(data) : null;
     },
 
     async getVerifications(accessToken, userId) {
-      const { data, error } = await clients
-        .forUser(accessToken)
-        .from('user_verifications')
-        .select(VERIFICATION_COLUMNS)
-        .eq('user_id', userId)
-        .returns<VerificationRow[]>();
+      const { data, error } = await db(
+        'get_verifications',
+        clients
+          .forUser(accessToken)
+          .from('user_verifications')
+          .select(VERIFICATION_COLUMNS)
+          .eq('user_id', userId)
+          .returns<VerificationRow[]>(),
+      );
       if (error) throw fail('get_verifications', error);
       return (data ?? []).map(toVerification);
     },
@@ -96,13 +101,10 @@ export function createSupabaseProfileRepository(clients: SupabaseClients, logger
         const value = changes[field as keyof ProfileUpdate];
         if (value !== undefined) row[column] = value;
       }
-      const { data, error } = await clients
-        .forUser(accessToken)
-        .from('profiles')
-        .update(row)
-        .eq('id', userId)
-        .select(PROFILE_COLUMNS)
-        .maybeSingle<ProfileRow>();
+      const { data, error } = await db(
+        'update_profile',
+        clients.forUser(accessToken).from('profiles').update(row).eq('id', userId).select(PROFILE_COLUMNS).maybeSingle<ProfileRow>(),
+      );
       if (error) {
         if (error.code === '42501') throw AppError.forbidden();
         if (error.code === '23514') throw AppError.badRequest('INVALID_PROFILE', 'Profile values are not accepted');

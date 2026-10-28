@@ -1,6 +1,9 @@
 import React from 'react';
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 import { AuthProvider, useAuth } from '../context/AuthContext';
+import { SessionStorageError } from '../lib/auth/sessionManager';
+import { createMemoryTokenStorage } from '../lib/auth/tokenStorage';
+import { errorMessage } from '../lib/auth/messages';
 import { apiError, fakeApi, fakeGoogle, onboarding, profile, services, session, NOW } from './support/fakes';
 
 async function renderAuth(s: ReturnType<typeof services>) {
@@ -202,5 +205,64 @@ describe('Google sign-in through the shared session', () => {
     });
     expect(s.api.me).toHaveBeenCalledTimes(1);
     expect(result.current.phase).toBe('signedIn');
+  });
+
+  test('a new Google user (profile not yet filled in) is sent to profile completion', async () => {
+    const api = fakeApi();
+    api.me.mockResolvedValue({ user: { id: 'user-1' }, profile: profile({ displayName: null, city: null, neighborhood: null, profileCompletedAt: null }) });
+    api.status.mockResolvedValue(onboarding({}, false));
+    const s = services({ api });
+    const { result } = await renderAuth(s);
+    await act(async () => {
+      await result.current.signInWithGoogle();
+    });
+    expect(result.current.guards).toMatchObject({ onboarding: true, app: false, auth: false });
+  });
+
+  test('when loading the account fails, every delivery of the callback hears the failure', async () => {
+    // The browser result and the deep-link route both deliver the same
+    // session; the second must not wait on a spinner while the first fails.
+    const api = fakeApi();
+    api.me.mockRejectedValue(apiError(401, 'INVALID_TOKEN'));
+    api.refresh.mockRejectedValue(apiError(401, 'INVALID_REFRESH_TOKEN'));
+    const s = services({ api });
+    const { result } = await renderAuth(s);
+    let outcomes: PromiseSettledResult<unknown>[] = [];
+    await act(async () => {
+      outcomes = await Promise.allSettled([result.current.signInWithGoogle(), result.current.completeOAuthCallback({ code: 'abc' })]);
+    });
+    expect(outcomes.map((o) => o.status)).toEqual(['rejected', 'rejected']);
+    expect(result.current.phase).toBe('signedOut');
+    await expect(s.storage.load()).resolves.toBeNull();
+  });
+
+  test('backend unreachable after Google: retry screen instead of a spinner, session kept', async () => {
+    const api = fakeApi();
+    api.me.mockRejectedValueOnce(apiError(0, 'NETWORK_ERROR'));
+    const s = services({ api });
+    const { result } = await renderAuth(s);
+    await act(async () => {
+      await result.current.signInWithGoogle().catch(() => undefined);
+    });
+    expect(result.current.phase).toBe('unreachable');
+    await expect(s.storage.load()).resolves.toEqual(session(9));
+  });
+
+  test('a session the device cannot save is not used, and the error says so', async () => {
+    const storage = createMemoryTokenStorage();
+    storage.save = jest.fn(async () => {
+      throw new Error('keychain unavailable');
+    });
+    const s = services({ storage });
+    const { result } = await renderAuth(s);
+    let error: unknown;
+    await act(async () => {
+      error = await result.current.signInWithGoogle().catch((e: unknown) => e);
+    });
+    expect(error).toBeInstanceOf(SessionStorageError);
+    expect(errorMessage(error)).toBe('Could not save your sign-in on this device. Please try again.');
+    expect(s.sessionManager.current).toBeNull();
+    expect(s.api.me).not.toHaveBeenCalled();
+    expect(result.current.phase).toBe('signedOut');
   });
 });

@@ -1,10 +1,12 @@
 import { isApiError } from '../api/client';
 import { OAuthError } from './googleAuth';
+import { SessionStorageError } from './sessionManager';
 
 // User-facing text for API and OAuth failures. Decided by error code, never
 // by the server's message, and never revealing whether an account exists.
 export function errorMessage(err: unknown): string {
   if (err instanceof OAuthError) return err.message;
+  if (err instanceof SessionStorageError) return 'Could not save your sign-in on this device. Please try again.';
   if (!isApiError(err)) return 'Something went wrong. Please try again.';
 
   switch (err.code) {
@@ -50,6 +52,23 @@ export function errorMessage(err: unknown): string {
       return 'Your session has ended. Please sign in again.';
     case 'VALIDATION_ERROR':
       return 'Please check the highlighted fields.';
+    case 'INVALID_PHONE':
+      return 'That phone number cannot be used. Check it and try again.';
+    case 'PHONE_COUNTRY_NOT_SUPPORTED':
+      return 'We cannot verify numbers from this country yet.';
+    case 'PHONE_ALREADY_ON_ACCOUNT':
+      return 'This number is already on your account but was not verified in NeighborShare. Use a different number or contact support.';
+    case 'NO_PENDING_PHONE_VERIFICATION':
+      return 'This code request is no longer active. Request a new code.';
+    case 'OTP_INVALID_OR_EXPIRED':
+      return 'That code is incorrect or has expired. Check it, or request a new code.';
+    case 'PHONE_VERIFICATION_UNAVAILABLE':
+      return 'Phone verification is not available right now. Please try again later.';
+    case 'PHONE_VERIFICATION_NOT_CONFIGURED':
+      // Retrying will not help until the server is set up; the app still works.
+      return 'Phone verification is not set up yet. You can keep using NeighborShare and verify your phone later.';
+    case 'SMS_DELIVERY_UNAVAILABLE':
+      return 'We could not send a text message right now. Check the number, or try again later.';
     default:
       return 'Something went wrong. Please try again.';
   }

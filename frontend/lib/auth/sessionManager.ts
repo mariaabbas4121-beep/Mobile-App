@@ -7,6 +7,14 @@ const EXPIRY_MARGIN_SECONDS = 60;
 
 export type SessionEvent = 'changed' | 'expired';
 
+// The device refused to store a new session (e.g. keychain unavailable).
+export class SessionStorageError extends Error {
+  constructor() {
+    super('Could not save the session on this device.');
+    this.name = 'SessionStorageError';
+  }
+}
+
 // The single owner of the session for the whole app. Every token refresh in
 // the app happens here, and concurrent refreshes share one request, because
 // Supabase rotates refresh tokens and a second refresh with the old token
@@ -35,14 +43,22 @@ export class SessionManager {
     for (const l of this.listeners) l(event);
   }
 
+  // Loads the saved session. A session set while storage was being read
+  // (e.g. a Google sign-in deep link that launched the app) is newer and
+  // wins: it is never overwritten by the older stored value.
   async restore(): Promise<Session | null> {
+    let stored: Session | null;
+    let unreadable = false;
     try {
-      this.session = await this.storage.load();
+      stored = await this.storage.load();
     } catch {
       // Unreadable storage (e.g. keychain reset): start signed out.
-      this.session = null;
-      await this.storage.clear().catch(() => undefined);
+      stored = null;
+      unreadable = true;
     }
+    if (this.session) return this.session;
+    this.session = stored;
+    if (unreadable) await this.storage.clear().catch(() => undefined);
     return this.session;
   }
 

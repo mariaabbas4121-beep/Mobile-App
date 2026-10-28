@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import type { TextInput } from 'react-native';
+import type { TextInputInstance } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../context/AuthContext';
 import { isApiError } from '../../lib/api/client';
@@ -29,9 +29,9 @@ export default function SignupScreen() {
   const [formError, setFormError] = useState<string | null>(null);
   const google = useGoogleSignIn(setFormError);
 
-  const emailRef = useRef<TextInput>(null);
-  const passwordRef = useRef<TextInput>(null);
-  const confirmRef = useRef<TextInput>(null);
+  const emailRef = useRef<TextInputInstance>(null);
+  const passwordRef = useRef<TextInputInstance>(null);
+  const confirmRef = useRef<TextInputInstance>(null);
 
   const set = (key: keyof SignupForm) => (value: string) => {
     setForm((f) => ({ ...f, [key]: value }));

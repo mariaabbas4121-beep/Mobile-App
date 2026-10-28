@@ -9,6 +9,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  type TextInputInstance,
   type TextInputProps,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -67,7 +68,7 @@ interface FieldProps extends TextInputProps {
   password?: boolean;
 }
 
-export const Field = forwardRef<TextInput, FieldProps>(function Field(
+export const Field = forwardRef<TextInputInstance, FieldProps>(function Field(
   { label, icon, error, hint, password, ...input },
   ref,
 ) {

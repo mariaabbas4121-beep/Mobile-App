@@ -12,6 +12,9 @@ import { createApp } from '../../src/app.js';
 import { createSupabaseClients } from '../../src/config/supabase.js';
 import { createSupabaseAuthGateway } from '../../src/auth/supabase-auth.gateway.js';
 import { createSupabaseProfileRepository } from '../../src/auth/supabase-profile.repository.js';
+import { createSupabasePhoneAuth } from '../../src/verification/supabase-phone-auth.js';
+import { createSupabasePhoneVerificationStore } from '../../src/verification/supabase-phone-verification.store.js';
+import { createPhoneVerificationService } from '../../src/verification/phone-verification.service.js';
 import { silentLogger } from '../helpers.js';
 
 dotenv.config({ quiet: true });
@@ -41,6 +44,12 @@ export function liveApp(config: Config) {
     logger: silentLogger,
     authGateway: createSupabaseAuthGateway(clients, config, silentLogger),
     profiles: createSupabaseProfileRepository(clients, silentLogger),
+    phoneVerification: createPhoneVerificationService({
+      auth: createSupabasePhoneAuth(clients, config, silentLogger),
+      store: createSupabasePhoneVerificationStore(clients, silentLogger),
+      policy: config.phoneVerification,
+      logger: silentLogger,
+    }),
   });
 }
 

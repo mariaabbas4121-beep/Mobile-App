@@ -1,7 +1,17 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { isApiError, type ApiClient } from '../lib/api/client';
-import type { LogoutScope, OnboardingStatus, Profile, ProfileUpdate, Session, SignupResult, User } from '../lib/api/types';
-import type { SessionManager } from '../lib/auth/sessionManager';
+import type {
+  LogoutScope,
+  OnboardingStatus,
+  PhoneStartResult,
+  PhoneVerification,
+  Profile,
+  ProfileUpdate,
+  Session,
+  SignupResult,
+  User,
+} from '../lib/api/types';
+import { SessionStorageError, type SessionManager } from '../lib/auth/sessionManager';
 import type { CallbackParams, GoogleAuth, GoogleSignInResult } from '../lib/auth/googleAuth';
 import { routeGuards, type AuthPhase, type RouteGuards } from '../lib/auth/routing';
 import { normaliseEmail } from '../lib/auth/validation';
@@ -36,6 +46,12 @@ export interface AuthContextValue {
   signOut: (scope?: LogoutScope) => Promise<void>;
   reloadAccount: () => Promise<void>;
   updateProfile: (changes: ProfileUpdate) => Promise<Profile>;
+  // Phone verification is an extra step on a signed-in account; the result
+  // is decided and stored by the server only.
+  getPhoneVerification: () => Promise<PhoneVerification>;
+  startPhoneVerification: (phoneE164: string) => Promise<PhoneStartResult>;
+  resendPhoneVerification: () => Promise<PhoneStartResult>;
+  confirmPhoneVerification: (phoneE164: string, code: string) => Promise<PhoneVerification>;
   googleConfigured: boolean;
 }
 
@@ -59,8 +75,10 @@ export function AuthProvider({ children, services }: { children: ReactNode; serv
   const [phase, setPhase] = useState<AuthPhase>('restoring');
   const [account, setAccount] = useState<Account | null>(null);
   const [sessionEndedNotice, setSessionEndedNotice] = useState(false);
-  // Sessions already applied, so a duplicated OAuth callback cannot sign in twice.
-  const applied = useRef(new Set<string>());
+  // Sessions being or already applied, by access token. A duplicated OAuth
+  // callback (browser result and deep link) shares the first one's outcome,
+  // so it cannot sign in twice and cannot wait on a result it never hears.
+  const applied = useRef(new Map<string, Promise<void>>());
 
   const fetchAccount = useCallback(async (): Promise<Account> => {
     const [{ user, profile }, onboarding] = await Promise.all([
@@ -103,6 +121,9 @@ export function AuthProvider({ children, services }: { children: ReactNode; serv
     (async () => {
       const session = await sessionManager.restore();
       if (cancelled) return;
+      // A sign-in finished while storage was read; it loads the account
+      // itself, so do not load it a second time or override its phase.
+      if (applied.current.size > 0) return;
       if (!session) {
         setPhase('signedOut');
         return;
@@ -130,11 +151,22 @@ export function AuthProvider({ children, services }: { children: ReactNode; serv
   );
 
   const applySession = useCallback(
-    async (session: Session) => {
-      if (applied.current.has(session.accessToken)) return;
-      applied.current.add(session.accessToken);
-      await sessionManager.setSession(session);
-      await reloadAccount();
+    (session: Session): Promise<void> => {
+      const existing = applied.current.get(session.accessToken);
+      if (existing) return existing;
+      const applying = (async () => {
+        try {
+          await sessionManager.setSession(session);
+        } catch {
+          // Not saved on the device: a session that would vanish on restart
+          // is not used at all.
+          await sessionManager.clear();
+          throw new SessionStorageError();
+        }
+        await reloadAccount();
+      })();
+      applied.current.set(session.accessToken, applying);
+      return applying;
     },
     [sessionManager, reloadAccount],
   );
@@ -202,6 +234,39 @@ export function AuthProvider({ children, services }: { children: ReactNode; serv
     [api, sessionManager, reloadAccount],
   );
 
+  // Runs a phone verification call. A 403 means the account status changed
+  // on the server (e.g. suspended): reload so navigation follows.
+  const phoneCall = useCallback(
+    async <T,>(call: (token: string) => Promise<T>): Promise<T> => {
+      try {
+        return await sessionManager.authorized(call);
+      } catch (err) {
+        if (isApiError(err) && err.status === 403) await reloadAccount().catch(() => undefined);
+        throw err;
+      }
+    },
+    [sessionManager, reloadAccount],
+  );
+
+  const getPhoneVerification = useCallback(
+    async () => (await phoneCall((t) => api.phoneVerification(t))).verification,
+    [api, phoneCall],
+  );
+  const startPhoneVerification = useCallback(
+    (phoneE164: string) => phoneCall((t) => api.startPhoneVerification(t, phoneE164)),
+    [api, phoneCall],
+  );
+  const resendPhoneVerification = useCallback(() => phoneCall((t) => api.resendPhoneVerification(t)), [api, phoneCall]);
+  const confirmPhoneVerification = useCallback(
+    async (phoneE164: string, code: string) => {
+      const { verification } = await phoneCall((t) => api.confirmPhoneVerification(t, phoneE164, code));
+      // The onboarding milestones come from the server; reload them.
+      await reloadAccount().catch(() => undefined);
+      return verification;
+    },
+    [api, phoneCall, reloadAccount],
+  );
+
   const value = useMemo<AuthContextValue>(
     () => ({
       phase,
@@ -219,9 +284,17 @@ export function AuthProvider({ children, services }: { children: ReactNode; serv
       signOut,
       reloadAccount,
       updateProfile,
+      getPhoneVerification,
+      startPhoneVerification,
+      resendPhoneVerification,
+      confirmPhoneVerification,
       googleConfigured: googleAuth.isConfigured(),
     }),
-    [phase, account, sessionEndedNotice, signUp, signIn, signInWithGoogle, completeOAuthCallback, resendConfirmation, signOut, reloadAccount, updateProfile, googleAuth],
+    [
+      phase, account, sessionEndedNotice, signUp, signIn, signInWithGoogle, completeOAuthCallback, resendConfirmation,
+      signOut, reloadAccount, updateProfile, getPhoneVerification, startPhoneVerification, resendPhoneVerification,
+      confirmPhoneVerification, googleAuth,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

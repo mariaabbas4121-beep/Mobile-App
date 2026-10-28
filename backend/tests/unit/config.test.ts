@@ -29,6 +29,25 @@ describe('loadConfig', () => {
     expect(config.corsOrigins).toEqual(['http://localhost:8081', 'https://app.example.com']);
   });
 
+  test('phone verification settings default safely and parse country codes', () => {
+    expect(loadConfig(validEnv).phoneVerification).toEqual({ resendCooldownSeconds: 60, otpLength: 6, allowedCountryCodes: [] });
+    const config = loadConfig({
+      ...validEnv,
+      PHONE_OTP_RESEND_COOLDOWN_SECONDS: '90',
+      PHONE_OTP_LENGTH: '8',
+      PHONE_ALLOWED_COUNTRY_CODES: '+92, 971',
+    });
+    expect(config.phoneVerification).toEqual({ resendCooldownSeconds: 90, otpLength: 8, allowedCountryCodes: ['92', '971'] });
+  });
+
+  test.each([
+    ['PHONE_OTP_RESEND_COOLDOWN_SECONDS', '5'],
+    ['PHONE_OTP_LENGTH', '4'],
+    ['PHONE_ALLOWED_COUNTRY_CODES', 'pk'],
+  ])('rejects an invalid %s', (name, value) => {
+    expect(problemsFor({ ...validEnv, [name]: value }).some((p) => p.startsWith(name))).toBe(true);
+  });
+
   test('treats an empty secret key as absent', () => {
     expect(loadConfig({ ...validEnv, SUPABASE_SECRET_KEY: '  ' }).supabase.secretKey).toBeUndefined();
   });

@@ -14,7 +14,8 @@ The app talks to this API for everything except one step of Google sign-in: it u
 | Database schema, provisioning triggers, RLS and grants | Applied to the dev project and tested live |
 | Rate limiting, account-status and role checks, sanitized errors and logs | Implemented and tested |
 | Google sign-in | Runs in the app through Supabase Auth (PKCE + deep link); this API accepts the resulting tokens. Code complete; end-to-end test on a device still pending |
-| Phone and identity (CNIC) verification | **Not implemented**: schema only; no provider chosen |
+| Phone verification (Supabase Auth phone-change OTP) | Implemented and unit/database tested. **Needs** the `20261026120000` migration applied and an SMS provider configured in Supabase ([setup](docs/SUPABASE.md#sms-setup-for-phone-verification)); real SMS delivery not yet tested |
+| Identity (CNIC) verification | **Not implemented**: schema only; no provider chosen |
 
 ## Documentation
 
@@ -57,7 +58,10 @@ Defined and validated in [src/config/env.ts](src/config/env.ts); template in [.e
 | --- | --- | --- |
 | `SUPABASE_URL` | Yes | Project URL (`https://<ref>.supabase.co`); https required in production |
 | `SUPABASE_PUBLISHABLE_KEY` | Yes | `sb_publishable_…`; Auth calls and per-user database access |
-| `SUPABASE_SECRET_KEY` | No | `sb_secret_…`; bypasses RLS. Server-only; needed by integration tests |
+| `SUPABASE_SECRET_KEY` | No | `sb_secret_…`; bypasses RLS. Server-only; needed by phone verification (to record results) and integration tests |
+| `PHONE_OTP_RESEND_COOLDOWN_SECONDS` | No | Seconds between SMS codes per user, 30–3600 (default `60`). At least Supabase's SMS max frequency |
+| `PHONE_OTP_LENGTH` | No | Digits in the SMS code, 6–10 (default `6`). Must match Supabase's SMS OTP length |
+| `PHONE_ALLOWED_COUNTRY_CODES` | No | Comma-separated calling codes SMS may go to, e.g. `92`. Empty allows all; set it in production |
 | `PORT` | No | Default `4000` |
 | `NODE_ENV` | No | `development` (default), `test` or `production` |
 | `LOG_LEVEL` | No | Default `info` (`silent` in tests) |
@@ -77,7 +81,9 @@ Defined and validated in [src/config/env.ts](src/config/env.ts); template in [.e
 - **Users cannot grant themselves anything.** Account status, verification results, roles and audit events are writable only by the server (secret key) or database triggers.
 - **Safe failure.** Supabase errors are mapped to fixed codes; responses never contain stack traces, provider messages or submitted values. Supabase calls time out (10 s per request, 12 s per auth operation) and return `503`.
 - **Logs** record method, path, status and timing, never headers, bodies, tokens or query strings. Unexpected errors are logged with their message for debugging, so server code must not put secrets into error messages.
-- **Abuse limits** on signup, login (per IP and per account), refresh and confirmation resends.
+- **Timing.** Each request's log line has `responseTime` (ms) and `reqId`, which is the `X-Request-Id` response header. Every Supabase Auth and database call made while serving it is logged with the same `reqId`, its name (`dependency`, e.g. `supabase_auth.get_user`, `database.get_profile`), `durationMs` and `outcome`: at `debug` level normally, at `warn` when it takes 2 s or more. Set `LOG_LEVEL=debug` to see them all. Arguments and results are never logged.
+- **Abuse limits** on signup, login (per IP and per account), refresh and confirmation resends, and on phone verification (per IP, per account, per destination number, plus a database-backed resend cooldown).
+- **Phone verification trusts only Supabase Auth.** Supabase sends and checks the code. The API records `verified` only after re-reading the user from Supabase with the caller's own token, and only for a number requested through the API. OTPs are never stored or logged. The SMS provider's credentials live in the Supabase dashboard, not here.
 
 ## Structure
 
@@ -96,7 +102,13 @@ backend/
 │   │   └── supabase.ts                   Supabase clients (anon, per-user, admin) with request timeouts
 │   ├── lib/                              AppError, logger
 │   ├── middleware/                       auth, account status, rate limits, validation, errors
-│   ├── routes/                           health, auth, profile
+│   ├── routes/                           health, auth, profile, verification
+│   ├── verification/
+│   │   ├── phone.ts                      Number parsing, request schemas, masking
+│   │   ├── phone.types.ts                Provider and store interfaces
+│   │   ├── phone-verification.service.ts The trust rules: when a number may be recorded as verified
+│   │   ├── supabase-phone-auth.ts        Supabase Auth phone-change calls and error mapping
+│   │   └── supabase-phone-verification.store.ts  Server-only database functions
 │   ├── app.ts                            Express app assembly
 │   └── server.ts                         Entry point: loads .env, validates, starts
 ├── supabase/
@@ -114,5 +126,6 @@ backend/
 1. Configure custom SMTP and the redirect URLs in Supabase ([checklist](docs/SUPABASE.md#dashboard-checklist)).
 2. Integrate the Expo app against [docs/API.md](docs/API.md): secure token storage, refresh on `INVALID_TOKEN`, and handling of the confirmation deep link.
 3. Finish the Google sign-in dashboard setup and test it on a device ([frontend/README.md](../frontend/README.md#google-sign-in)).
-4. Choose SMS and identity providers for phone and CNIC verification.
-5. Before running several API instances, move rate-limit counters to a shared store.
+4. Phone verification: apply the `20261026120000` migration, choose and configure an SMS provider ([setup](docs/SUPABASE.md#sms-setup-for-phone-verification)), then run the [manual test](docs/TESTING.md#manual-phone-verification-test).
+5. Choose an identity provider for CNIC verification.
+6. Before running several API instances, move rate-limit counters to a shared store. (The phone resend cooldown already lives in the database.)

@@ -5,6 +5,9 @@ import { createLogger } from './lib/logger.js';
 import { createSupabaseClients } from './config/supabase.js';
 import { createSupabaseAuthGateway } from './auth/supabase-auth.gateway.js';
 import { createSupabaseProfileRepository } from './auth/supabase-profile.repository.js';
+import { createSupabasePhoneAuth } from './verification/supabase-phone-auth.js';
+import { createSupabasePhoneVerificationStore } from './verification/supabase-phone-verification.store.js';
+import { createPhoneVerificationService } from './verification/phone-verification.service.js';
 
 // Load .env only in the entry point, so tests decide their own environment.
 // Existing process variables take precedence over the file.
@@ -29,6 +32,14 @@ const app = createApp({
   logger,
   authGateway: createSupabaseAuthGateway(supabase, config, logger),
   profiles: createSupabaseProfileRepository(supabase, logger),
+  // Needs SUPABASE_SECRET_KEY to record results; without it the endpoints
+  // answer 503 SERVER_NOT_CONFIGURED.
+  phoneVerification: createPhoneVerificationService({
+    auth: createSupabasePhoneAuth(supabase, config, logger),
+    store: createSupabasePhoneVerificationStore(supabase, logger),
+    policy: config.phoneVerification,
+    logger,
+  }),
 });
 
 const server = app.listen(config.port, () => {
