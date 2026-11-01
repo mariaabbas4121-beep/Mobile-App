@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Image, Dimensions, Alert,
+  Image, Dimensions, Alert, ActivityIndicator,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -9,6 +9,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Toast from 'react-native-toast-message';
 import { useApp } from '../../context/AppContext';
+import { useAuth } from '../../context/AuthContext';
+import { useListings } from '../../context/ListingsContext';
+import { useSubmit } from '../../components/auth/useSubmit';
+import { isApiError } from '../../lib/api/client';
+import type { Listing } from '../../lib/api/types';
+import { errorMessage } from '../../lib/auth/messages';
+import { categoryLabel, conditionLabel, formatPkr } from '../../lib/listings/options';
 import { Colors, Typography, Spacing, Radii, Shadows } from '../../utils/theme';
 
 const { width, height } = Dimensions.get('window');
@@ -16,29 +23,130 @@ const { width, height } = Dimensions.get('window');
 export default function ItemDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const { items, requestBorrow } = useApp();
-  const item = items.find(i => i.id === id);
+  const { requestBorrow } = useApp();
+  const { user } = useAuth();
+  const listings = useListings();
 
+  const [item, setItem] = useState<Listing | null>(null);
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [error, setError] = useState<unknown>(null);
   const [teachMe, setTeachMe] = useState(false);
   const [requesting, setRequesting] = useState(false);
 
-  if (!item) return null;
+  // Always shows the server's copy; availability is never decided locally.
+  const load = useCallback(
+    async (quiet: boolean) => {
+      if (!id) return;
+      if (!quiet) setStatus('loading');
+      try {
+        setItem(await listings.get(id));
+        setError(null);
+        setStatus('ready');
+      } catch (err) {
+        setError(err);
+        if (!quiet) setStatus('error');
+      }
+    },
+    [id, listings.get],
+  );
 
-  const isOwnItem = item.ownerId === 'u1';
+  useEffect(() => {
+    void load(false);
+  }, [load]);
 
+  // Reload after an edit made on another screen.
+  const seenRevision = useRef(listings.revision);
+  useEffect(() => {
+    if (listings.revision !== seenRevision.current) {
+      seenRevision.current = listings.revision;
+      void load(true);
+    }
+  }, [listings.revision, load]);
+
+  const [toggleAvailability, toggling] = useSubmit(
+    useCallback(async () => {
+      if (!item) return;
+      const next = item.availability === 'available' ? 'unavailable' : 'available';
+      try {
+        setItem(await listings.setAvailability(item.id, next));
+        Toast.show({ type: 'success', text1: next === 'available' ? 'Marked as available' : 'Marked as unavailable' });
+      } catch (err) {
+        Toast.show({ type: 'error', text1: 'Could not update availability', text2: errorMessage(err) });
+      }
+    }, [item, listings]),
+  );
+
+  const [archive, archiving] = useSubmit(
+    useCallback(async () => {
+      if (!item) return;
+      try {
+        await listings.archive(item.id);
+        Toast.show({ type: 'success', text1: 'Listing removed', text2: 'Neighbors can no longer see this item' });
+        router.back();
+      } catch (err) {
+        Toast.show({ type: 'error', text1: 'Could not remove listing', text2: errorMessage(err) });
+      }
+    }, [item, listings, router]),
+  );
+
+  const confirmArchive = () =>
+    Alert.alert('Remove this listing?', 'Neighbors will no longer see it. This cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: () => void archive() },
+    ]);
+
+  if (status !== 'ready' || !item) {
+    // A malformed id (e.g. a sample item from the map prototype) is as
+    // missing as a deleted one.
+    const missing = isApiError(error) && (error.code === 'LISTING_NOT_FOUND' || error.code === 'VALIDATION_ERROR');
+    return (
+      <View style={[styles.container, styles.centered]}>
+        <SafeAreaView edges={['top']} style={styles.stateBackWrap}>
+          <TouchableOpacity style={styles.stateBackBtn} onPress={() => router.back()} accessibilityLabel="Go back">
+            <Ionicons name="arrow-back" size={20} color={Colors.navy} />
+          </TouchableOpacity>
+        </SafeAreaView>
+        {status === 'loading' ? (
+          <ActivityIndicator size="large" color={Colors.sage} accessibilityLabel="Loading item" />
+        ) : (
+          <>
+            <Text style={styles.stateEmoji}>{missing ? '📦' : '📡'}</Text>
+            <Text style={styles.stateTitle}>{missing ? 'Item not found' : 'Could not load this item'}</Text>
+            <Text style={styles.stateDesc}>{missing ? 'This item is no longer listed.' : errorMessage(error)}</Text>
+            {!missing && (
+              <TouchableOpacity style={styles.stateRetry} onPress={() => void load(false)} accessibilityRole="button" accessibilityLabel="Try again">
+                <Text style={styles.stateRetryText}>Try again</Text>
+              </TouchableOpacity>
+            )}
+          </>
+        )}
+      </View>
+    );
+  }
+
+  const isOwnItem = item.owner.id === user?.id;
+  const available = item.availability === 'available' && !item.archivedAt;
+  const ownerName = item.owner.displayName ?? 'Neighbor';
+  const photos = item.images.filter((img) => img.url);
+
+  // Borrow requests are still the on-device prototype (Phase 2B makes them
+  // real); the owner is not notified.
   const handleRequest = () => {
-    if (!item.available) return;
+    if (!available) return;
     setRequesting(true);
     setTimeout(() => {
-      requestBorrow(item.id, teachMe);
+      requestBorrow(
+        { id: item.id, title: item.title, image: photos[0]?.url ?? '', ownerId: item.owner.id, ownerName },
+        teachMe,
+      );
       setRequesting(false);
       Toast.show({
         type: 'success',
-        text1: '✅ Request Sent!',
-        text2: `${item.ownerName} will review your request shortly`,
+        text1: 'Request saved (preview)',
+        text2: 'Borrow requests are not sent to owners yet',
       });
       router.replace('/(tabs)/activity');
-    }, 1000);
+    }, 600);
   };
 
   return (
@@ -46,26 +154,41 @@ export default function ItemDetailScreen() {
       <ScrollView showsVerticalScrollIndicator={false}>
         {/* Hero image */}
         <View style={styles.imageContainer}>
-          <Image source={{ uri: item.image }} style={styles.heroImage} resizeMode="cover" />
+          {photos.length > 0 ? (
+            <ScrollView horizontal pagingEnabled showsHorizontalScrollIndicator={false}>
+              {photos.map((photo) => (
+                <Image key={photo.id} source={{ uri: photo.url! }} style={styles.heroImage} resizeMode="cover" />
+              ))}
+            </ScrollView>
+          ) : (
+            <View style={[styles.heroImage, styles.heroPlaceholder]}>
+              <Ionicons name="image-outline" size={56} color={Colors.slate} />
+            </View>
+          )}
           <LinearGradient
             colors={['transparent', Colors.navy + 'CC']}
             style={styles.imageOverlay}
+            pointerEvents="none"
           />
           {/* Back button */}
           <SafeAreaView edges={['top']} style={styles.backWrap}>
-            <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+            <TouchableOpacity style={styles.backBtn} onPress={() => router.back()} accessibilityLabel="Go back">
               <Ionicons name="arrow-back" size={20} color={Colors.white} />
             </TouchableOpacity>
-            <TouchableOpacity style={styles.shareBtn}>
-              <Ionicons name="share-outline" size={20} color={Colors.white} />
-            </TouchableOpacity>
+            {photos.length > 1 ? (
+              <View style={styles.photoCount}>
+                <Text style={styles.photoCountText}>{photos.length} photos</Text>
+              </View>
+            ) : null}
           </SafeAreaView>
 
           {/* Image badges */}
-          <View style={styles.imageBadges}>
-            <View style={[styles.availBadge, { backgroundColor: item.available ? Colors.sage : Colors.rose }]}>
+          <View style={styles.imageBadges} pointerEvents="none">
+            <View style={[styles.availBadge, { backgroundColor: available ? Colors.sage : Colors.rose }]}>
               <View style={styles.availDot} />
-              <Text style={styles.availText}>{item.available ? 'Available Now' : 'Currently In Use'}</Text>
+              <Text style={styles.availText}>
+                {item.archivedAt ? 'Removed' : available ? 'Available Now' : 'Currently Unavailable'}
+              </Text>
             </View>
             {item.teachMeEnabled && (
               <View style={styles.teachBadge}>
@@ -80,18 +203,18 @@ export default function ItemDetailScreen() {
           {/* Title & condition */}
           <View style={styles.titleRow}>
             <View style={styles.titleLeft}>
-              <Text style={styles.category}>{item.category}</Text>
+              <Text style={styles.category}>{categoryLabel(item.category)}</Text>
               <Text style={styles.title}>{item.title}</Text>
             </View>
             <View style={[styles.conditionChip, {
-              backgroundColor: item.condition === 'Excellent' ? Colors.sagePale
-                : item.condition === 'Good' ? Colors.amberPale : Colors.fog
+              backgroundColor: item.condition === 'excellent' ? Colors.sagePale
+                : item.condition === 'good' ? Colors.amberPale : Colors.fog
             }]}>
               <Text style={[styles.conditionText, {
-                color: item.condition === 'Excellent' ? Colors.sageDark
-                  : item.condition === 'Good' ? Colors.amberDark : Colors.slate
+                color: item.condition === 'excellent' ? Colors.sageDark
+                  : item.condition === 'good' ? Colors.amberDark : Colors.slate
               }]}>
-                {item.condition}
+                {conditionLabel(item.condition)}
               </Text>
             </View>
           </View>
@@ -100,12 +223,14 @@ export default function ItemDetailScreen() {
           <View style={styles.statsRow}>
             <View style={styles.statItem}>
               <Ionicons name="location-outline" size={16} color={Colors.amber} />
-              <Text style={styles.statText}>{item.distance} away</Text>
+              <Text style={styles.statText} numberOfLines={1}>{item.area ?? 'Area not set'}</Text>
             </View>
             <View style={styles.statDivider} />
             <View style={styles.statItem}>
-              <Ionicons name="repeat-outline" size={16} color={Colors.sky} />
-              <Text style={styles.statText}>Lent {item.borrowCount}x</Text>
+              <Ionicons name="cash-outline" size={16} color={Colors.sky} />
+              <Text style={styles.statText} numberOfLines={1}>
+                {item.replacementValuePkr != null ? `Worth ${formatPkr(item.replacementValuePkr)}` : 'Value not set'}
+              </Text>
             </View>
             <View style={styles.statDivider} />
             <View style={styles.statItem}>
@@ -120,30 +245,38 @@ export default function ItemDetailScreen() {
             <Text style={styles.description}>{item.description}</Text>
           </View>
 
+          {item.borrowingTerms ? (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Borrowing terms</Text>
+              <Text style={styles.description}>{item.borrowingTerms}</Text>
+            </View>
+          ) : null}
+
           {/* Tags */}
-          <View style={styles.tagsRow}>
-            {item.tags.map(tag => (
-              <View key={tag} style={styles.tag}>
-                <Text style={styles.tagText}>{tag}</Text>
-              </View>
-            ))}
-          </View>
+          {item.tags.length > 0 && (
+            <View style={styles.tagsRow}>
+              {item.tags.map(tag => (
+                <View key={tag} style={styles.tag}>
+                  <Text style={styles.tagText}>{tag}</Text>
+                </View>
+              ))}
+            </View>
+          )}
 
           {/* Owner card */}
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Listed by</Text>
             <View style={styles.ownerCard}>
-              <Image source={{ uri: item.ownerAvatar }} style={styles.ownerAvatar} />
+              <View style={[styles.ownerAvatar, styles.ownerInitialWrap]}>
+                <Text style={styles.ownerInitial}>{ownerName.charAt(0).toUpperCase()}</Text>
+              </View>
               <View style={styles.ownerInfo}>
-                <Text style={styles.ownerName}>{item.ownerName}</Text>
+                <Text style={styles.ownerName}>{isOwnItem ? `${ownerName} (you)` : ownerName}</Text>
                 <View style={styles.trustRow}>
-                  <Ionicons name="shield-checkmark" size={13} color={Colors.sage} />
-                  <Text style={styles.trustScore}>Trust Score: {item.ownerTrustScore}/100</Text>
+                  <Ionicons name="calendar-outline" size={13} color={Colors.sage} />
+                  <Text style={styles.trustScore}>Listed {new Date(item.createdAt).toLocaleDateString()}</Text>
                 </View>
               </View>
-              <TouchableOpacity style={styles.msgBtn}>
-                <Ionicons name="chatbubble-outline" size={18} color={Colors.navy} />
-              </TouchableOpacity>
             </View>
           </View>
 
@@ -197,6 +330,42 @@ export default function ItemDetailScreen() {
       </ScrollView>
 
       {/* Bottom action */}
+      {isOwnItem && !item.archivedAt && (
+        <View style={styles.bottomAction}>
+          <View style={styles.ownerActions}>
+            <TouchableOpacity
+              style={styles.ownerActionBtn}
+              onPress={() => router.push({ pathname: '/lend/new', params: { id: item.id } })}
+              accessibilityRole="button"
+              accessibilityLabel="Edit listing"
+            >
+              <Ionicons name="create-outline" size={18} color={Colors.navy} />
+              <Text style={styles.ownerActionText}>Edit</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.ownerActionBtn, styles.ownerActionWide]}
+              onPress={() => void toggleAvailability()}
+              disabled={toggling}
+              accessibilityRole="button"
+              accessibilityLabel={item.availability === 'available' ? 'Mark unavailable' : 'Mark available'}
+            >
+              <Ionicons name={item.availability === 'available' ? 'pause-circle-outline' : 'play-circle-outline'} size={18} color={Colors.navy} />
+              <Text style={styles.ownerActionText}>
+                {toggling ? 'Saving…' : item.availability === 'available' ? 'Mark unavailable' : 'Mark available'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.ownerActionBtn, styles.ownerActionDanger]}
+              onPress={confirmArchive}
+              disabled={archiving}
+              accessibilityRole="button"
+              accessibilityLabel="Remove listing"
+            >
+              <Ionicons name="trash-outline" size={18} color={Colors.rose} />
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
       {!isOwnItem && (
         <View style={styles.bottomAction}>
           <View style={styles.bottomInner}>
@@ -205,18 +374,18 @@ export default function ItemDetailScreen() {
               <Text style={styles.borrowLabel}>Community Borrow</Text>
             </View>
             <TouchableOpacity
-              style={[styles.borrowBtn, !item.available && styles.borrowBtnDisabled]}
+              style={[styles.borrowBtn, !available && styles.borrowBtnDisabled]}
               onPress={handleRequest}
               activeOpacity={0.85}
-              disabled={!item.available || requesting}
+              disabled={!available || requesting}
             >
               <LinearGradient
-                colors={item.available ? [Colors.amber, Colors.amberDark] : [Colors.slate, Colors.slate]}
+                colors={available ? [Colors.amber, Colors.amberDark] : [Colors.slate, Colors.slate]}
                 style={styles.borrowBtnGrad}
                 start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
               >
                 <Text style={styles.borrowBtnText}>
-                  {requesting ? 'Sending…' : !item.available ? 'Not Available' : 'Request to Borrow'}
+                  {requesting ? 'Sending…' : !available ? 'Not Available' : 'Request to Borrow'}
                 </Text>
               </LinearGradient>
             </TouchableOpacity>
@@ -229,8 +398,30 @@ export default function ItemDetailScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.offWhite },
+  centered: { alignItems: 'center', justifyContent: 'center', padding: Spacing.xl },
+  stateBackWrap: { position: 'absolute', top: 0, left: Spacing.xl },
+  stateBackBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: Colors.fog, alignItems: 'center', justifyContent: 'center' },
+  stateEmoji: { fontSize: 48, marginBottom: Spacing.md },
+  stateTitle: { fontSize: Typography.sizes.lg, fontWeight: Typography.weights.bold, color: Colors.navy },
+  stateDesc: { fontSize: Typography.sizes.base, color: Colors.slate, marginTop: Spacing.xs, textAlign: 'center' },
+  stateRetry: { marginTop: Spacing.lg, backgroundColor: Colors.sage, paddingHorizontal: Spacing.xl, paddingVertical: Spacing.sm + 2, borderRadius: Radii.full },
+  stateRetryText: { color: Colors.white, fontWeight: Typography.weights.bold, fontSize: Typography.sizes.sm },
+  heroPlaceholder: { backgroundColor: Colors.fog, alignItems: 'center', justifyContent: 'center' },
+  photoCount: { alignSelf: 'center', backgroundColor: 'rgba(15,23,42,0.5)', borderRadius: Radii.full, paddingHorizontal: Spacing.md, paddingVertical: 4 },
+  photoCountText: { color: Colors.white, fontSize: Typography.sizes.xs, fontWeight: Typography.weights.semibold },
+  ownerInitialWrap: { backgroundColor: Colors.sagePale, alignItems: 'center', justifyContent: 'center' },
+  ownerInitial: { fontSize: Typography.sizes.lg, fontWeight: Typography.weights.bold, color: Colors.sageDark },
+  ownerActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  ownerActionBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    borderRadius: Radii.lg, borderWidth: 1.5, borderColor: Colors.fog,
+    paddingHorizontal: Spacing.md, paddingVertical: Spacing.md,
+  },
+  ownerActionWide: { flex: 1 },
+  ownerActionDanger: { borderColor: Colors.rose + '55' },
+  ownerActionText: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.bold, color: Colors.navy },
   imageContainer: { position: 'relative', height: height * 0.42 },
-  heroImage: { width: '100%', height: '100%' },
+  heroImage: { width, height: height * 0.42 },
   imageOverlay: { ...StyleSheet.absoluteFill },
   backWrap: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: Spacing.xl },
   backBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: 'rgba(15,23,42,0.5)', alignItems: 'center', justifyContent: 'center' },

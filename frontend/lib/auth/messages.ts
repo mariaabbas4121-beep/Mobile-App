@@ -69,6 +69,24 @@ export function errorMessage(err: unknown): string {
       return 'Phone verification is not set up yet. You can keep using NeighborShare and verify your phone later.';
     case 'SMS_DELIVERY_UNAVAILABLE':
       return 'We could not send a text message right now. Check the number, or try again later.';
+    case 'LISTING_NOT_FOUND':
+      return 'This item is no longer listed.';
+    case 'LISTING_ARCHIVED':
+      return 'This listing has been removed and can no longer be changed.';
+    case 'INVALID_LISTING':
+      return 'Some listing details were not accepted. Check them and try again.';
+    case 'FORBIDDEN':
+      return 'You do not have permission to do that.';
+    case 'IMAGE_LIMIT_REACHED':
+      return 'A listing can have at most 5 photos.';
+    case 'UNSUPPORTED_IMAGE_TYPE':
+    case 'EMPTY_IMAGE':
+      return 'That photo could not be used. Choose a JPEG, PNG or WebP image.';
+    case 'PAYLOAD_TOO_LARGE':
+      return 'That photo is too large. Choose one under 5 MB.';
+    case 'STORAGE_NOT_CONFIGURED':
+    case 'STORAGE_UNAVAILABLE':
+      return 'Photo uploads are not available right now. Please try again later.';
     default:
       return 'Something went wrong. Please try again.';
   }

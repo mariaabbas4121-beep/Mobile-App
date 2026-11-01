@@ -7,6 +7,7 @@ This is the contract the mobile app integrates against. Everything here is imple
 - [Auth](#auth): [signup](#post-apiv1authsignup), [login](#post-apiv1authlogin), [refresh](#post-apiv1authrefresh), [resend confirmation](#post-apiv1authemailresend), [logout](#post-apiv1authlogout), [me](#get-apiv1authme), [status](#get-apiv1authstatus)
 - [Profile](#profile): [update](#patch-apiv1profileme)
 - [Phone verification](#phone-verification): [status](#get-apiv1verificationphone), [start](#post-apiv1verificationphonestart), [resend](#post-apiv1verificationphoneresend), [confirm](#post-apiv1verificationphoneconfirm)
+- [Listings](#listings): [list](#get-apiv1items), [get](#get-apiv1itemsid), [create](#post-apiv1items), [update](#patch-apiv1itemsid), [archive](#delete-apiv1itemsid), [add photo](#post-apiv1itemsidimages), [remove photo](#delete-apiv1itemsidimagesimageid)
 - [Email confirmation flow](#email-confirmation-flow)
 - [Error codes](#error-codes)
 - [Rate limits](#rate-limits)
@@ -385,6 +386,118 @@ Account status: start, resend and confirm need `active` or `restricted` (same ru
 
 Nothing requires a verified phone today. To require it for a high-trust action (for example creating a listing or requesting an item), add a guard after `requireAuth` that reads the caller's phone record and refuses with `403` unless `status` is `verified`, and document the new error code here. That policy has not been decided, so no guard exists.
 
+## Listings
+
+Items users offer to lend. Reads are public; writes need a token and act only on the caller's own listings. Every database and Storage call runs **with the caller's token** (or anonymously for public reads), so Row-Level Security enforces the same ownership rules a second time; the secret key is not used. Borrow requests and reservations are not part of this API yet (Phase 2B).
+
+**Listing object**
+
+```json
+{
+  "id": "5d0c6f8e-2a7b-4f39-9f0a-3c1e2b4d6a10",
+  "owner": { "id": "0b8e7f7e-6f3c-4c51-9a63-0d6c6a2f0f11", "displayName": "Sara" },
+  "title": "Bosch power drill",
+  "description": "Cordless drill with two batteries and a set of bits.",
+  "category": "tools",
+  "condition": "good",
+  "replacementValuePkr": 15000,
+  "borrowingTerms": "Return within 3 days",
+  "area": "UAF Hostel 3",
+  "availability": "available",
+  "teachMeEnabled": false,
+  "tags": ["DIY", "Home"],
+  "archivedAt": null,
+  "createdAt": "2026-10-28T10:00:00.000Z",
+  "updatedAt": "2026-10-28T10:00:00.000Z",
+  "images": [
+    { "id": "c2f…", "url": "https://<project>.supabase.co/storage/v1/object/sign/listing-images/…?token=…", "contentType": "image/jpeg", "createdAt": "…" }
+  ]
+}
+```
+
+- The owner appears as id and display name only. No email, phone, city, bio or address is ever returned.
+- `category`: `tools`, `electronics`, `home`, `outdoor`, `kitchen`, `sports`, `books`, `other`. `condition`: `excellent`, `good`, `fair`. `availability`: `available`, `unavailable`.
+- `area` is an approximate place the owner typed (2–80 characters), never coordinates.
+- `replacementValuePkr` is an indicative value in whole rupees (0–10,000,000), informational only.
+- `images[].url` is a **signed URL valid for one hour**; reload the listing for fresh ones. It is `null` if Storage could not sign it.
+
+**Body fields (create and update)**
+
+| Field | Rules |
+| --- | --- |
+| `title` | Required on create; 3–80 characters after trimming |
+| `description` | Required on create; 10–2000 characters |
+| `category`, `condition` | Required on create; one of the values above |
+| `replacementValuePkr` | Optional integer 0–10,000,000, or `null` |
+| `borrowingTerms` | Optional, up to 1000 characters; blank or `null` clears it |
+| `area` | Optional, 2–80 characters; blank or `null` clears it |
+| `availability` | Optional; default `available` |
+| `teachMeEnabled` | Optional boolean; default `false` |
+| `tags` | Optional array of up to 5 strings of 1–24 characters; duplicates differing only in case are merged |
+
+Unknown fields, including `ownerId`, `id` and `archivedAt`, are rejected with `400 VALIDATION_ERROR`. The owner is always the caller.
+
+### `GET /api/v1/items`
+
+Public. A token is optional; if an `Authorization` header is sent it must be valid (`401` otherwise).
+
+| Query | Meaning |
+| --- | --- |
+| `q` | Up to 100 characters. Every word must appear (case-insensitive) in the title, description or tags |
+| `category`, `condition`, `availability` | Exact filters |
+| `owner=me` | Only the caller's own listings (token required) |
+| `includeArchived=true` | With `owner=me`: include the caller's archived listings |
+| `sort` | `newest` (default), `oldest`, `title` |
+| `page`, `pageSize` | Default 1 and 20; `pageSize` at most 50 |
+
+`200`:
+
+```json
+{ "success": true, "data": { "items": [ { "…": "listing" } ], "pagination": { "page": 1, "pageSize": 20, "total": 42, "totalPages": 3 } } }
+```
+
+Archived listings, and listings of suspended or deletion-pending accounts, never appear in public results.
+
+### `GET /api/v1/items/:id`
+
+Public, token optional. `200 { "data": { "listing": { … } } }`. `404 LISTING_NOT_FOUND` if it does not exist or is archived (an archived listing is still returned to its owner). `400 VALIDATION_ERROR` if `:id` is not a UUID.
+
+### `POST /api/v1/items`
+
+Token required; account must be `active`.
+
+```json
+{ "title": "Bosch power drill", "description": "Cordless drill with two batteries.", "category": "tools", "condition": "good", "area": "UAF Hostel 3", "tags": ["DIY"] }
+```
+
+`201 { "data": { "listing": { … } } }`. Errors: `400 VALIDATION_ERROR`, `401`, `403 ACCOUNT_RESTRICTED` / `ACCOUNT_SUSPENDED` / `ACCOUNT_DELETION_PENDING`, `429 RATE_LIMITED`.
+
+### `PATCH /api/v1/items/:id`
+
+Token required; owner only. Any subset of the body fields (at least one).
+
+```json
+{ "availability": "unavailable" }
+```
+
+`200 { "data": { "listing": { … } } }`. Restricted accounts may change only `availability` (`403 ACCOUNT_RESTRICTED` otherwise). Errors: `403 FORBIDDEN` (not the owner), `404 LISTING_NOT_FOUND`, `409 LISTING_ARCHIVED`.
+
+### `DELETE /api/v1/items/:id`
+
+Token required; owner only; account `active` or `restricted`. **Archives** the listing: it disappears from discovery, the owner can still read it, and it cannot be edited or restored. Repeating the call is harmless. `200 { "data": { "listing": { …, "archivedAt": "…" } } }`. Errors: `403 FORBIDDEN`, `404 LISTING_NOT_FOUND`. Photos of archived listings are kept, for later borrow history.
+
+### `POST /api/v1/items/:id/images`
+
+Token required; owner only; account `active`. The request body **is the image file** (not multipart, not JSON), with `Content-Type` `image/jpeg`, `image/png` or `image/webp`, at most **5 MB**. The server checks that the file's first bytes match the declared type, chooses the storage path itself (`<owner id>/<listing id>/<random id>.<ext>` in the private `listing-images` bucket), and allows at most **5 photos** per listing.
+
+`201 { "data": { "image": { "id": "…", "url": "…", "contentType": "image/jpeg", "createdAt": "…" } } }`. Errors: `415 UNSUPPORTED_IMAGE_TYPE`, `400 EMPTY_IMAGE`, `413 PAYLOAD_TOO_LARGE`, `403 FORBIDDEN`, `404 LISTING_NOT_FOUND`, `409 LISTING_ARCHIVED`, `409 IMAGE_LIMIT_REACHED`, `503 STORAGE_NOT_CONFIGURED` / `STORAGE_UNAVAILABLE`.
+
+Postman: Body → *binary* → choose the file, and set the `Content-Type` header to the image type.
+
+### `DELETE /api/v1/items/:id/images/:imageId`
+
+Token required; owner only. Removes the photo record and its file. `204`. Errors: `403 FORBIDDEN`, `404 LISTING_NOT_FOUND` / `IMAGE_NOT_FOUND`. If deleting the file itself fails, the photo is still gone from the listing and the orphaned file is logged.
+
 ## Email confirmation flow
 
 1. The app calls `POST /auth/signup` and shows the `202` message.
@@ -416,12 +529,19 @@ The API has no endpoint for step 2: Supabase handles the link itself. How the mo
 | 403 | `ACCOUNT_BLOCKED` | Login: user banned in Supabase Auth |
 | 403 | `ACCOUNT_SUSPENDED` | Status-guarded routes |
 | 403 | `ACCOUNT_DELETION_PENDING` | Status-guarded routes |
-| 403 | `ACCOUNT_RESTRICTED` | Status-guarded routes that exclude restricted accounts (none yet) |
+| 403 | `ACCOUNT_RESTRICTED` | Status-guarded routes that exclude restricted accounts (listing create, photo upload, listing edits other than availability) |
 | 403 | `SIGNUP_DISABLED` | Signup turned off in Supabase |
 | 403 | `FORBIDDEN` | Not permitted (e.g. missing role) |
 | 404 | `ROUTE_NOT_FOUND` | Unknown path or method |
+| 404 | `LISTING_NOT_FOUND` | Listings: no such listing, or archived and not yours |
+| 404 | `IMAGE_NOT_FOUND` | Listing photo delete |
+| 409 | `LISTING_ARCHIVED` | Listings: change or photo upload on an archived listing |
+| 409 | `IMAGE_LIMIT_REACHED` | Listing photo upload: already 5 photos |
+| 400 | `INVALID_LISTING` | Listings: a database constraint refused a value |
+| 400 | `EMPTY_IMAGE` | Listing photo upload with an empty body |
+| 415 | `UNSUPPORTED_IMAGE_TYPE` | Listing photo upload: not JPEG/PNG/WebP, or content does not match `Content-Type` |
 | 409 | `EMAIL_ALREADY_REGISTERED` | Signup, only if email confirmation is disabled |
-| 413 | `PAYLOAD_TOO_LARGE` | Body over 100 kB |
+| 413 | `PAYLOAD_TOO_LARGE` | JSON body over 100 kB; photo over 5 MB |
 | 422 | `WEAK_PASSWORD` | Signup: Supabase's password check failed; `details.reasons` |
 | 429 | `RATE_LIMITED` | This API's limits or Supabase's own; see `Retry-After` |
 | 500 | `INTERNAL_ERROR` | Unexpected server error (logged with the `requestId`) |
@@ -433,6 +553,8 @@ The API has no endpoint for step 2: Supabase handles the link itself. How the mo
 | 503 | `DATABASE_UNAVAILABLE` | Database query failed |
 | 503 | `EMAIL_DELIVERY_UNAVAILABLE` | Supabase cannot send email (custom SMTP not configured) |
 | 503 | `SERVER_NOT_CONFIGURED` | A server-side feature lacks its configuration |
+| 503 | `STORAGE_NOT_CONFIGURED` | Listing photos: the `listing-images` bucket does not exist (migration not applied) |
+| 503 | `STORAGE_UNAVAILABLE` | Listing photos: Supabase Storage failed |
 
 ## Rate limits
 
@@ -453,6 +575,8 @@ Limits are per API process. Several instances behind a load balancer need a shar
 | `POST /verification/phone/resend` | 5 / hour | Account |
 | `POST /verification/phone/confirm` | 30 / 15 min | Client IP |
 | `POST /verification/phone/confirm` | 10 / 15 min | Account |
+| `POST /items` | 20 / hour | Account |
+| `POST /items/:id/images` | 60 / hour | Account |
 | Phone start + resend | 1 SMS per `PHONE_OTP_RESEND_COOLDOWN_SECONDS` (default 60 s) | Account; **stored in the database**, so it holds across API instances and makes double taps safe |
 
 IPv6 clients are grouped by /56. Behind a reverse proxy, set `TRUST_PROXY_HOPS` so the real client IP is used. Supabase applies its own limits as well (notably on sending email and SMS, and on OTP verifications per IP); those also surface as `429 RATE_LIMITED`. Phone limits are keyed by a hash of the user id or number, never the raw value, and never include the code.

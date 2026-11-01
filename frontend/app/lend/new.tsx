@@ -1,37 +1,129 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, KeyboardAvoidingView, Platform, Image,
+  TextInput, KeyboardAvoidingView, Platform, Image, ActivityIndicator,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Toast from 'react-native-toast-message';
-import * as ImagePicker from 'expo-image-picker'; // 1. Import the Picker
-import { useApp } from '../../context/AppContext';
+import * as ImagePicker from 'expo-image-picker';
+import { useAuth } from '../../context/AuthContext';
+import { useListings, type SaveResult } from '../../context/ListingsContext';
+import { useSubmit } from '../../components/auth/useSubmit';
+import { isApiError } from '../../lib/api/client';
+import type { Listing, ListingImage, ListingInput } from '../../lib/api/types';
+import { errorMessage } from '../../lib/auth/messages';
+import { CATEGORY_OPTIONS, CONDITION_OPTIONS, MAX_LISTING_PHOTOS } from '../../lib/listings/options';
+import { toLocalPhoto, type LocalPhoto } from '../../lib/listings/photos';
+import {
+  serverFieldErrors,
+  validateListingForm,
+  type ListingForm,
+  type ListingFormErrors,
+} from '../../lib/listings/validation';
 import { Colors, Typography, Spacing, Radii, Shadows } from '../../utils/theme';
 
-const CATEGORIES = ['Tools', 'Electronics', 'Home', 'Outdoor', 'Kitchen', 'Sports', 'Books', 'Other'];
-const CONDITIONS = ['Excellent', 'Good', 'Fair'] as const;
+const formFrom = (l: Listing): ListingForm => ({
+  title: l.title,
+  description: l.description,
+  category: l.category,
+  condition: l.condition,
+  replacementValue: l.replacementValuePkr != null ? String(l.replacementValuePkr) : '',
+  borrowingTerms: l.borrowingTerms ?? '',
+  area: l.area ?? '',
+  tags: l.tags.join(', '),
+  teachMeEnabled: l.teachMeEnabled,
+});
+
+// Only the fields that differ from the saved listing are sent.
+function changesFrom(saved: Listing, input: ListingInput): Partial<ListingInput> {
+  const changes: Partial<ListingInput> = {};
+  if (input.title !== saved.title) changes.title = input.title;
+  if (input.description !== saved.description) changes.description = input.description;
+  if (input.category !== saved.category) changes.category = input.category;
+  if (input.condition !== saved.condition) changes.condition = input.condition;
+  if ((input.replacementValuePkr ?? null) !== saved.replacementValuePkr) changes.replacementValuePkr = input.replacementValuePkr ?? null;
+  if ((input.borrowingTerms ?? null) !== saved.borrowingTerms) changes.borrowingTerms = input.borrowingTerms ?? null;
+  if ((input.area ?? null) !== saved.area) changes.area = input.area ?? null;
+  if (input.teachMeEnabled !== saved.teachMeEnabled) changes.teachMeEnabled = input.teachMeEnabled ?? false;
+  if ((input.tags ?? []).join('\u0000') !== saved.tags.join('\u0000')) changes.tags = input.tags ?? [];
+  return changes;
+}
+
+function FieldError({ message }: { message: string | undefined }) {
+  return message ? <Text style={styles.errorText}>{message}</Text> : null;
+}
 
 export default function LendNewScreen() {
   const router = useRouter();
-  const { addItem } = useApp();
+  const { id: editId } = useLocalSearchParams<{ id?: string }>();
+  const editing = Boolean(editId);
+  const listings = useListings();
+  const { profile } = useAuth();
 
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [category, setCategory] = useState('Tools');
-  const [condition, setCondition] = useState<'Excellent' | 'Good' | 'Fair'>('Good');
-  const [teachMe, setTeachMe] = useState(false);
-  const [tags, setTags] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  
-  // 2. Track selected images locally
-  const [images, setImages] = useState<string[]>([]);
+  const [form, setForm] = useState<ListingForm>({
+    title: '',
+    description: '',
+    category: 'tools',
+    condition: 'good',
+    replacementValue: '',
+    borrowingTerms: '',
+    // A sensible default the owner can change; never more precise than this.
+    area: profile?.neighborhood ?? '',
+    tags: '',
+    teachMeEnabled: false,
+  });
+  const [errors, setErrors] = useState<ListingFormErrors>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saved, setSaved] = useState<Listing | null>(null);
+  const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>(editing ? 'loading' : 'ready');
+  const [loadError, setLoadError] = useState<unknown>(null);
+  // Photos already on the listing that the owner keeps, and new ones to upload.
+  const [keptImages, setKeptImages] = useState<ListingImage[]>([]);
+  const [newPhotos, setNewPhotos] = useState<LocalPhoto[]>([]);
 
-  // 3. Logic to access device photos
+  const set = <K extends keyof ListingForm>(key: K, value: ListingForm[K]) => {
+    setForm((f) => ({ ...f, [key]: value }));
+    setErrors((e) => (e[key] ? { ...e, [key]: undefined } : e));
+  };
+
+  const loadListing = useCallback(async () => {
+    if (!editId) return;
+    setLoadState('loading');
+    try {
+      const listing = await listings.get(editId);
+      setSaved(listing);
+      setForm(formFrom(listing));
+      setKeptImages(listing.images);
+      setLoadState('ready');
+    } catch (err) {
+      setLoadError(err);
+      setLoadState('error');
+    }
+    // Loads once per listing; later revisions come from this screen's own save.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editId]);
+
+  useEffect(() => {
+    void loadListing();
+  }, [loadListing]);
+
+  // The profile may finish loading after this screen opens.
+  const neighborhood = profile?.neighborhood;
+  useEffect(() => {
+    if (!editing && neighborhood) setForm((f) => (f.area ? f : { ...f, area: neighborhood }));
+  }, [editing, neighborhood]);
+
+  const photoCount = keptImages.length + newPhotos.length;
+
   const pickImages = async () => {
+    const remaining = MAX_LISTING_PHOTOS - photoCount;
+    if (remaining <= 0) {
+      Toast.show({ type: 'info', text1: `You can add up to ${MAX_LISTING_PHOTOS} photos` });
+      return;
+    }
     const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
 
     if (!permissionResult.granted) {
@@ -44,53 +136,92 @@ export default function LendNewScreen() {
     }
 
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsMultipleSelection: true, // Allows up to 5 files
-      selectionLimit: 5,
+      mediaTypes: ['images'],
+      allowsMultipleSelection: true,
+      selectionLimit: remaining,
       quality: 0.8,
+      // iOS: deliver HEIC photos as JPEG, which the server accepts.
+      preferredAssetRepresentationMode: ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
     });
 
     if (!result.canceled) {
-      const selectedUris = result.assets.map(asset => asset.uri);
-      setImages(prev => [...prev, ...selectedUris].slice(0, 5)); // Keep max 5
+      const picked = result.assets.map(toLocalPhoto);
+      const accepted = picked.filter((p): p is LocalPhoto => typeof p !== 'string');
+      if (picked.includes('too_large')) Toast.show({ type: 'error', text1: 'Some photos are over 5 MB and were skipped' });
+      else if (picked.includes('unsupported')) Toast.show({ type: 'error', text1: 'Only JPEG, PNG and WebP photos can be used' });
+      setNewPhotos((prev) => [...prev, ...accepted].slice(0, MAX_LISTING_PHOTOS - keptImages.length));
     }
   };
 
-  const removeImage = (index: number) => {
-    setImages(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const handleSubmit = () => {
-    if (!title || !description) {
-      Toast.show({ type: 'error', text1: 'Please fill title and description' });
-      return;
-    }
-    setSubmitting(true);
-    setTimeout(() => {
-      addItem({
-        title,
-        description,
-        category,
-        condition,
-        teachMeEnabled: teachMe,
-        tags: tags.split(',').map(t => t.trim()).filter(Boolean),
-        images: images, // Pass image array to application context state
-      });
-      setSubmitting(false);
-      Toast.show({ type: 'success', text1: '🎉 Item listed!', text2: 'Neighbors can now see your item' });
+  const [handleSubmit, submitting] = useSubmit(
+    useCallback(async () => {
+      setFormError(null);
+      const { errors: found, input } = validateListingForm(form);
+      if (!input) {
+        setErrors(found);
+        setFormError('Please check the highlighted fields.');
+        return;
+      }
+      let result: SaveResult;
+      try {
+        if (editId && saved) {
+          const removeIds = saved.images.filter((img) => !keptImages.some((k) => k.id === img.id)).map((img) => img.id);
+          result = await listings.update(editId, changesFrom(saved, input), { add: newPhotos, removeIds });
+        } else {
+          result = await listings.create(input, newPhotos);
+        }
+      } catch (err) {
+        if (isApiError(err) && err.code === 'VALIDATION_ERROR') setErrors(serverFieldErrors(err.fieldIssues));
+        setFormError(errorMessage(err));
+        return;
+      }
+      if (result.failedPhotos > 0) {
+        Toast.show({
+          type: 'error',
+          text1: editing ? 'Changes saved, but some photos failed' : 'Item listed, but some photos failed',
+          text2: `${result.failedPhotos} photo(s) not uploaded. ${errorMessage(result.photoError)}`,
+        });
+      } else {
+        Toast.show(
+          editing
+            ? { type: 'success', text1: 'Changes saved' }
+            : { type: 'success', text1: '🎉 Item listed!', text2: 'Neighbors can now see your item' },
+        );
+      }
       router.back();
-    }, 1000);
-  };
+    }, [form, editId, editing, saved, keptImages, newPhotos, listings, router]),
+  );
+
+  if (loadState !== 'ready') {
+    return (
+      <View style={[styles.container, styles.centered]}>
+        {loadState === 'loading' ? (
+          <ActivityIndicator size="large" color={Colors.green || '#2e7d32'} accessibilityLabel="Loading listing" />
+        ) : (
+          <>
+            <Text style={styles.stateTitle}>Could not load this listing</Text>
+            <Text style={styles.stateDesc}>{errorMessage(loadError)}</Text>
+            <TouchableOpacity style={styles.stateBtn} onPress={() => void loadListing()} accessibilityRole="button">
+              <Text style={styles.stateBtnText}>Try again</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => router.back()} accessibilityRole="button">
+              <Text style={styles.stateLink}>Go back</Text>
+            </TouchableOpacity>
+          </>
+        )}
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <SafeAreaView edges={['top']}>
           <View style={styles.headerRow}>
-            <TouchableOpacity onPress={() => router.back()} style={styles.closeBtn}>
+            <TouchableOpacity onPress={() => router.back()} style={styles.closeBtn} accessibilityLabel="Close">
               <Ionicons name="close" size={22} color={Colors.greenDark || '#1b5e20'} />
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>List an Item</Text>
+            <Text style={styles.headerTitle}>{editing ? 'Edit Listing' : 'List an Item'}</Text>
             <View style={{ width: 40 }} />
           </View>
         </SafeAreaView>
@@ -99,24 +230,41 @@ export default function LendNewScreen() {
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
 
-          {/* 4. Swapped wrapper view with TouchableOpacity container */}
-          <TouchableOpacity 
-            style={styles.photoUpload} 
+          <TouchableOpacity
+            style={styles.photoUpload}
             onPress={pickImages}
             activeOpacity={0.7}
+            disabled={submitting}
+            accessibilityRole="button"
+            accessibilityLabel="Add photos"
           >
             <Ionicons name="camera-outline" size={32} color={Colors.green || '#2e7d32'} />
             <Text style={styles.photoText}>Add Photos</Text>
-            <Text style={styles.photoSub}>{images.length}/5 photos selected (tap to upload)</Text>
+            <Text style={styles.photoSub}>{photoCount}/{MAX_LISTING_PHOTOS} photos · JPEG, PNG or WebP, up to 5 MB</Text>
           </TouchableOpacity>
 
-          {/* 5. Render Selected Thumbnail Previews */}
-          {images.length > 0 && (
+          {photoCount > 0 && (
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.previewScroll} contentContainerStyle={styles.previewContainer}>
-              {images.map((uri, index) => (
-                <View key={index} style={styles.thumbnailWrapper}>
-                  <Image source={{ uri }} style={styles.thumbnail} />
-                  <TouchableOpacity style={styles.removeBadge} onPress={() => removeImage(index)}>
+              {keptImages.map((img) => (
+                <View key={img.id} style={styles.thumbnailWrapper}>
+                  {img.url ? <Image source={{ uri: img.url }} style={styles.thumbnail} /> : <View style={[styles.thumbnail, styles.thumbnailEmpty]} />}
+                  <TouchableOpacity
+                    style={styles.removeBadge}
+                    onPress={() => setKeptImages((prev) => prev.filter((k) => k.id !== img.id))}
+                    accessibilityLabel="Remove photo"
+                  >
+                    <Ionicons name="close-circle" size={20} color="#ef4444" />
+                  </TouchableOpacity>
+                </View>
+              ))}
+              {newPhotos.map((photo, index) => (
+                <View key={photo.uri} style={styles.thumbnailWrapper}>
+                  <Image source={{ uri: photo.uri }} style={styles.thumbnail} />
+                  <TouchableOpacity
+                    style={styles.removeBadge}
+                    onPress={() => setNewPhotos((prev) => prev.filter((_, i) => i !== index))}
+                    accessibilityLabel="Remove photo"
+                  >
                     <Ionicons name="close-circle" size={20} color="#ef4444" />
                   </TouchableOpacity>
                 </View>
@@ -128,40 +276,48 @@ export default function LendNewScreen() {
           <View style={styles.field}>
             <Text style={styles.label}>Item Title *</Text>
             <TextInput
-              style={styles.input}
-              value={title}
-              onChangeText={setTitle}
+              style={[styles.input, errors.title && styles.inputError]}
+              value={form.title}
+              onChangeText={(v) => set('title', v)}
               placeholder="e.g. Bosch Power Drill"
               placeholderTextColor={Colors.slate}
+              maxLength={80}
+              accessibilityLabel="Item title"
             />
+            <FieldError message={errors.title} />
           </View>
 
           {/* Description */}
           <View style={styles.field}>
             <Text style={styles.label}>Description *</Text>
             <TextInput
-              style={[styles.input, styles.textarea]}
-              value={description}
-              onChangeText={setDescription}
+              style={[styles.input, styles.textarea, errors.description && styles.inputError]}
+              value={form.description}
+              onChangeText={(v) => set('description', v)}
               placeholder="Describe your item, model, what it's good for..."
               placeholderTextColor={Colors.slate}
               multiline
               numberOfLines={4}
               textAlignVertical="top"
+              maxLength={2000}
+              accessibilityLabel="Description"
             />
+            <FieldError message={errors.description} />
           </View>
 
           {/* Category */}
           <View style={styles.field}>
             <Text style={styles.label}>Category</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScroll} contentContainerStyle={styles.catContent}>
-              {CATEGORIES.map(cat => (
+              {CATEGORY_OPTIONS.map(cat => (
                 <TouchableOpacity
-                  key={cat}
-                  style={[styles.catChip, category === cat && styles.catChipActive]}
-                  onPress={() => setCategory(cat)}
+                  key={cat.value}
+                  style={[styles.catChip, form.category === cat.value && styles.catChipActive]}
+                  onPress={() => set('category', cat.value)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: form.category === cat.value }}
                 >
-                  <Text style={[styles.catText, category === cat && styles.catTextActive]}>{cat}</Text>
+                  <Text style={[styles.catText, form.category === cat.value && styles.catTextActive]}>{cat.label}</Text>
                 </TouchableOpacity>
               ))}
             </ScrollView>
@@ -171,39 +327,93 @@ export default function LendNewScreen() {
           <View style={styles.field}>
             <Text style={styles.label}>Condition</Text>
             <View style={styles.conditionRow}>
-              {CONDITIONS.map(cond => (
+              {CONDITION_OPTIONS.map(cond => (
                 <TouchableOpacity
-                  key={cond}
-                  style={[styles.condBtn, condition === cond && styles.condBtnActive]}
-                  onPress={() => setCondition(cond)}
+                  key={cond.value}
+                  style={[styles.condBtn, form.condition === cond.value && styles.condBtnActive]}
+                  onPress={() => set('condition', cond.value)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: form.condition === cond.value }}
                 >
                   <View style={[styles.condDot, {
-                    backgroundColor: cond === 'Excellent' ? (Colors.green || '#2e7d32') : cond === 'Good' ? '#f59e0b' : Colors.slate
+                    backgroundColor: cond.value === 'excellent' ? (Colors.green || '#2e7d32') : cond.value === 'good' ? '#f59e0b' : Colors.slate
                   }]} />
-                  <Text style={[styles.condText, condition === cond && styles.condTextActive]}>{cond}</Text>
+                  <Text style={[styles.condText, form.condition === cond.value && styles.condTextActive]}>{cond.label}</Text>
                 </TouchableOpacity>
               ))}
             </View>
+          </View>
+
+          {/* Area */}
+          <View style={styles.field}>
+            <Text style={styles.label}>Area (optional)</Text>
+            <TextInput
+              style={[styles.input, errors.area && styles.inputError]}
+              value={form.area}
+              onChangeText={(v) => set('area', v)}
+              placeholder="e.g. UAF Hostel 3 — never your exact address"
+              placeholderTextColor={Colors.slate}
+              maxLength={80}
+              accessibilityLabel="Area"
+            />
+            <FieldError message={errors.area} />
+          </View>
+
+          {/* Replacement value */}
+          <View style={styles.field}>
+            <Text style={styles.label}>Approximate value in rupees (optional)</Text>
+            <TextInput
+              style={[styles.input, errors.replacementValue && styles.inputError]}
+              value={form.replacementValue}
+              onChangeText={(v) => set('replacementValue', v)}
+              placeholder="e.g. 15000"
+              placeholderTextColor={Colors.slate}
+              keyboardType="number-pad"
+              maxLength={12}
+              accessibilityLabel="Approximate value"
+            />
+            <FieldError message={errors.replacementValue} />
+          </View>
+
+          {/* Borrowing terms */}
+          <View style={styles.field}>
+            <Text style={styles.label}>Borrowing terms (optional)</Text>
+            <TextInput
+              style={[styles.input, styles.textareaSmall, errors.borrowingTerms && styles.inputError]}
+              value={form.borrowingTerms}
+              onChangeText={(v) => set('borrowingTerms', v)}
+              placeholder="e.g. Return within 3 days, clean after use"
+              placeholderTextColor={Colors.slate}
+              multiline
+              textAlignVertical="top"
+              maxLength={1000}
+              accessibilityLabel="Borrowing terms"
+            />
+            <FieldError message={errors.borrowingTerms} />
           </View>
 
           {/* Tags */}
           <View style={styles.field}>
             <Text style={styles.label}>Tags (comma-separated)</Text>
             <TextInput
-              style={styles.input}
-              value={tags}
-              onChangeText={setTags}
+              style={[styles.input, errors.tags && styles.inputError]}
+              value={form.tags}
+              onChangeText={(v) => set('tags', v)}
               placeholder="e.g. DIY, Home, Repairs"
               placeholderTextColor={Colors.slate}
+              accessibilityLabel="Tags"
             />
+            <FieldError message={errors.tags} />
           </View>
 
           {/* Teach Me toggle */}
           <View style={styles.field}>
             <TouchableOpacity
-              style={[styles.teachToggle, teachMe && styles.teachToggleActive]}
-              onPress={() => setTeachMe(v => !v)}
+              style={[styles.teachToggle, form.teachMeEnabled && styles.teachToggleActive]}
+              onPress={() => set('teachMeEnabled', !form.teachMeEnabled)}
               activeOpacity={0.8}
+              accessibilityRole="switch"
+              accessibilityState={{ checked: form.teachMeEnabled }}
             >
               <View style={styles.teachLeft}>
                 <Text style={styles.teachIcon}>🎓</Text>
@@ -212,8 +422,8 @@ export default function LendNewScreen() {
                   <Text style={styles.teachSub}>Offer a 15-min demo. Earn 50 Karma per session.</Text>
                 </View>
               </View>
-              <View style={[styles.toggle, teachMe && styles.toggleOn]}>
-                <View style={[styles.thumb, teachMe && styles.thumbOn]} />
+              <View style={[styles.toggle, form.teachMeEnabled && styles.toggleOn]}>
+                <View style={[styles.thumb, form.teachMeEnabled && styles.thumbOn]} />
               </View>
             </TouchableOpacity>
           </View>
@@ -226,20 +436,31 @@ export default function LendNewScreen() {
             </Text>
           </View>
 
+          {formError ? <Text style={[styles.errorText, styles.formError]} accessibilityRole="alert">{formError}</Text> : null}
+
           {/* Form Submit Primary CTA */}
           <TouchableOpacity
-            style={styles.submitBtn}
-            onPress={handleSubmit}
+            style={[styles.submitBtn, submitting && styles.submitBtnBusy]}
+            onPress={() => void handleSubmit()}
             activeOpacity={0.85}
             disabled={submitting}
+            accessibilityRole="button"
+            accessibilityLabel={editing ? 'Save changes' : 'List my item'}
+            accessibilityState={{ busy: submitting, disabled: submitting }}
           >
             <LinearGradient
               colors={[Colors.green || '#2e7d32', Colors.greenDark || '#1b5e20']}
               style={styles.submitGrad}
               start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
             >
-              <Ionicons name="cloud-upload-outline" size={20} color={Colors.white} />
-              <Text style={styles.submitText}>{submitting ? 'Listing…' : 'List My Item'}</Text>
+              {submitting ? (
+                <ActivityIndicator color={Colors.white} />
+              ) : (
+                <Ionicons name="cloud-upload-outline" size={20} color={Colors.white} />
+              )}
+              <Text style={styles.submitText}>
+                {submitting ? (editing ? 'Saving…' : 'Listing…') : editing ? 'Save Changes' : 'List My Item'}
+              </Text>
             </LinearGradient>
           </TouchableOpacity>
 
@@ -252,6 +473,12 @@ export default function LendNewScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.offWhite },
+  centered: { alignItems: 'center', justifyContent: 'center', padding: Spacing.xl },
+  stateTitle: { fontSize: Typography.sizes.lg, fontWeight: Typography.weights.bold, color: Colors.greenDark || '#1b5e20' },
+  stateDesc: { fontSize: Typography.sizes.base, color: Colors.slate, marginTop: Spacing.xs, textAlign: 'center' },
+  stateBtn: { marginTop: Spacing.lg, backgroundColor: Colors.green || '#2e7d32', paddingHorizontal: Spacing.xl, paddingVertical: Spacing.sm + 2, borderRadius: Radii.full },
+  stateBtnText: { color: Colors.white, fontWeight: Typography.weights.bold, fontSize: Typography.sizes.sm },
+  stateLink: { marginTop: Spacing.md, color: Colors.slate, fontWeight: Typography.weights.semibold },
   header: { 
     backgroundColor: Colors.white, 
     paddingHorizontal: Spacing.xl, 
@@ -276,6 +503,7 @@ const styles = StyleSheet.create({
   previewContainer: { paddingHorizontal: Spacing.xl, gap: Spacing.sm, flexDirection: 'row' },
   thumbnailWrapper: { position: 'relative' },
   thumbnail: { width: 75, height: 75, borderRadius: Radii.md, borderWidth: 1.5, borderColor: Colors.fog },
+  thumbnailEmpty: { backgroundColor: Colors.fog },
   removeBadge: { position: 'absolute', top: -6, right: -6, backgroundColor: Colors.white, borderRadius: 10 },
   field: { marginBottom: Spacing.xl },
   label: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.bold, color: Colors.greenDark || '#1b5e20', marginBottom: Spacing.sm },
@@ -285,6 +513,10 @@ const styles = StyleSheet.create({
     fontSize: Typography.sizes.base, color: Colors.greenDark || '#1b5e20', fontWeight: Typography.weights.medium, ...Shadows.sm,
   },
   textarea: { height: 100, paddingTop: Spacing.md },
+  textareaSmall: { height: 70, paddingTop: Spacing.md },
+  inputError: { borderColor: '#ef4444' },
+  errorText: { color: '#b91c1c', fontSize: Typography.sizes.xs, marginTop: 4, fontWeight: Typography.weights.semibold },
+  formError: { textAlign: 'center', marginBottom: Spacing.md, fontSize: Typography.sizes.sm },
   catScroll: { marginHorizontal: -Spacing.xl },
   catContent: { paddingHorizontal: Spacing.xl, gap: Spacing.sm },
   catChip: {
@@ -327,6 +559,7 @@ const styles = StyleSheet.create({
   },
   guidelinesText: { flex: 1, fontSize: Typography.sizes.xs, color: Colors.greenDark || '#1b5e20', lineHeight: 16, fontWeight: Typography.weights.semibold },
   submitBtn: { borderRadius: Radii.lg, overflow: 'hidden', ...Shadows.md },
+  submitBtnBusy: { opacity: 0.7 },
   submitGrad: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: Spacing.sm, paddingVertical: Spacing.base },
   submitText: { fontSize: Typography.sizes.md, fontWeight: Typography.weights.bold, color: Colors.white },
 });

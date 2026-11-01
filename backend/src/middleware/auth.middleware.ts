@@ -32,6 +32,14 @@ export function requireAuth(gateway: AuthGateway): RequestHandler {
   };
 }
 
+// For public routes that show more to a signed-in caller. No header: the
+// request continues anonymously. A header that is present must be valid;
+// a bad token is never silently downgraded to anonymous.
+export function optionalAuth(gateway: AuthGateway): RequestHandler {
+  const authenticate = requireAuth(gateway);
+  return (req, res, next) => (req.get('authorization') ? authenticate(req, res, next) : next());
+}
+
 // Authorization for privileged routes. Mount after requireAuth. Roles live in
 // Supabase app_metadata, which users cannot edit; anything in the request
 // itself is ignored.

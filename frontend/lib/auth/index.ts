@@ -9,6 +9,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { config } from '../config';
 import { createApiClient, type RequestTiming } from '../api/client';
 import { fetchWithTimeout, runStartupDiagnostics } from '../api/diagnostics';
+import { fileUpload } from '../api/fileUpload';
 import { SessionManager } from './sessionManager';
 import { createTokenStorage } from './tokenStorage';
 import { createGoogleAuth, OAUTH_CALLBACK_PATH } from './googleAuth';
@@ -24,7 +25,11 @@ WebBrowser.maybeCompleteAuthSession();
 const logTiming = (t: RequestTiming) =>
   console.info(`[api] ${t.method} ${t.path} -> ${t.status} in ${t.durationMs} ms${t.requestId ? ` (request ${t.requestId})` : ''}`);
 
-export const api = createApiClient({ baseUrl: config.apiUrl, ...(__DEV__ ? { onTiming: logTiming } : {}) });
+export const api = createApiClient({
+  baseUrl: config.apiUrl,
+  uploadFile: fileUpload,
+  ...(__DEV__ ? { onTiming: logTiming } : {}),
+});
 export const sessionManager = new SessionManager(api, createTokenStorage());
 
 // Supabase calls made by the app itself (Google sign-in only) get the same

@@ -1,6 +1,12 @@
 import type {
   ApiErrorCode,
   FieldIssue,
+  ImageUploadType,
+  Listing,
+  ListingImage,
+  ListingInput,
+  ListingPage,
+  ListingQuery,
   LogoutScope,
   OnboardingStatus,
   PhoneStartResult,
@@ -20,9 +26,11 @@ export const LOGOUT_TIMEOUT_MS = 5_000;
 // The health check does not touch Supabase; a slow answer means the API
 // itself cannot be reached.
 export const HEALTH_TIMEOUT_MS = 4_000;
+// A photo of a few MB on a slow mobile connection.
+export const UPLOAD_TIMEOUT_MS = 90_000;
 
 // One finished request, for development timing logs. Never includes bodies,
-// headers or tokens; paths carry no secrets (the API uses no query strings).
+// headers, tokens or query strings (they can hold search text).
 export interface RequestTiming {
   method: string;
   path: string;
@@ -64,11 +72,29 @@ export class ApiError extends Error {
 export const isApiError = (e: unknown): e is ApiError => e instanceof ApiError;
 
 interface RequestOptions {
-  method: 'GET' | 'POST' | 'PATCH';
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   path: string;
+  query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
   accessToken?: string;
   timeoutMs?: number;
+}
+
+// Sends a local file as the raw request body (POST). Implemented natively on
+// devices (lib/api/fileUpload.ts) so the file is never copied through a JS
+// Blob. Resolves for any HTTP status; rejects on network failure, and with
+// UploadTimeoutError when `timeoutMs` passes.
+export type FileUploader = (
+  url: string,
+  fileUri: string,
+  init: { headers: Record<string, string>; contentType: string; timeoutMs: number },
+) => Promise<{ status: number; body: string; headers: Record<string, string> }>;
+
+export class UploadTimeoutError extends Error {
+  constructor() {
+    super('Upload timed out');
+    this.name = 'UploadTimeoutError';
+  }
 }
 
 export interface ApiClientOptions {
@@ -78,6 +104,8 @@ export interface ApiClientOptions {
   // Called once per finished request (development diagnostics).
   onTiming?: (timing: RequestTiming) => void;
   now?: () => number;
+  // Needed only for photo uploads.
+  uploadFile?: FileUploader;
 }
 
 // One client for the whole app. It never logs requests, bodies or headers.
@@ -87,8 +115,9 @@ export function createApiClient({
   timeoutMs = REQUEST_TIMEOUT_MS,
   onTiming,
   now = Date.now,
+  uploadFile,
 }: ApiClientOptions) {
-  async function request<T>({ method, path, body, accessToken, timeoutMs: limit = timeoutMs }: RequestOptions): Promise<T> {
+  async function request<T>({ method, path, query, body, accessToken, timeoutMs: limit = timeoutMs }: RequestOptions): Promise<T> {
     if (!baseUrl) {
       throw new ApiError(0, 'NOT_CONFIGURED', 'The app is not configured with a server address.');
     }
@@ -105,7 +134,7 @@ export function createApiClient({
 
     let response: Response;
     try {
-      response = await fetchImpl(`${baseUrl}/api/v1${path}`, {
+      response = await fetchImpl(`${baseUrl}/api/v1${path}${queryString(query)}`, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -131,21 +160,47 @@ export function createApiClient({
     } catch {
       throw new ApiError(response.status, 'BAD_RESPONSE', 'The server sent an unexpected response.');
     }
+    return unwrap<T>(response.status, payload, response.headers.get('retry-after'));
+  }
 
-    if (response.ok && isObject(payload) && payload.success === true) {
-      return payload.data as T;
+  // Photo upload: the file goes as the raw body, read natively from disk.
+  async function upload<T>(path: string, fileUri: string, contentType: string, accessToken: string): Promise<T> {
+    if (!baseUrl) {
+      throw new ApiError(0, 'NOT_CONFIGURED', 'The app is not configured with a server address.');
     }
+    if (!uploadFile) {
+      throw new ApiError(0, 'NOT_CONFIGURED', 'Photo uploads are not available in this build.');
+    }
+    const started = now();
+    const report = (status: RequestTiming['status'], requestId?: string) =>
+      onTiming?.({ method: 'POST', path, status, durationMs: now() - started, requestId });
 
-    if (isObject(payload) && payload.success === false && typeof payload.code === 'string') {
-      const retryAfter = Number(response.headers.get('retry-after'));
-      throw new ApiError(response.status, payload.code, typeof payload.message === 'string' ? payload.message : 'Request failed', {
-        details: payload.details,
-        requestId: typeof payload.requestId === 'string' ? payload.requestId : undefined,
-        retryAfterSeconds: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+    let result: Awaited<ReturnType<FileUploader>>;
+    try {
+      result = await uploadFile(`${baseUrl}/api/v1${path}`, fileUri, {
+        headers: { Accept: 'application/json', 'Content-Type': contentType, Authorization: `Bearer ${accessToken}` },
+        contentType,
+        timeoutMs: UPLOAD_TIMEOUT_MS,
       });
+    } catch (err) {
+      if (err instanceof UploadTimeoutError) {
+        report('TIMEOUT');
+        throw new ApiError(0, 'TIMEOUT', 'The upload took too long. Please try again.');
+      }
+      report('NETWORK_ERROR');
+      throw new ApiError(0, 'NETWORK_ERROR', 'Could not reach NeighborShare. Check your connection and try again.');
     }
+    const header = (name: string) =>
+      Object.entries(result.headers ?? {}).find(([k]) => k.toLowerCase() === name)?.[1] ?? null;
+    report(result.status, header('x-request-id') ?? undefined);
 
-    throw new ApiError(response.status, 'BAD_RESPONSE', 'The server sent an unexpected response.');
+    let payload: unknown;
+    try {
+      payload = JSON.parse(result.body);
+    } catch {
+      throw new ApiError(result.status, 'BAD_RESPONSE', 'The server sent an unexpected response.');
+    }
+    return unwrap<T>(result.status, payload, header('retry-after'));
   }
 
   return {
@@ -178,7 +233,54 @@ export function createApiClient({
         body: { phone, code },
         accessToken,
       }),
+
+    // Listings. Reads work without a token; a token adds the caller's own
+    // archived listings (owner=me) and archived detail pages.
+    listItems: (query: ListingQuery, accessToken?: string) =>
+      request<ListingPage>({ method: 'GET', path: '/items', query: { ...query }, ...(accessToken ? { accessToken } : {}) }),
+    getItem: (id: string, accessToken?: string) =>
+      request<{ listing: Listing }>({ method: 'GET', path: `/items/${encodeURIComponent(id)}`, ...(accessToken ? { accessToken } : {}) }),
+    createItem: (accessToken: string, input: ListingInput) =>
+      request<{ listing: Listing }>({ method: 'POST', path: '/items', body: input, accessToken }),
+    updateItem: (accessToken: string, id: string, changes: Partial<ListingInput>) =>
+      request<{ listing: Listing }>({ method: 'PATCH', path: `/items/${encodeURIComponent(id)}`, body: changes, accessToken }),
+    archiveItem: (accessToken: string, id: string) =>
+      request<{ listing: Listing }>({ method: 'DELETE', path: `/items/${encodeURIComponent(id)}`, accessToken }),
+    // `fileUri` is a local file from the image picker (file://, content://,
+    // or blob: on the web).
+    uploadItemImage: (accessToken: string, id: string, fileUri: string, contentType: ImageUploadType) =>
+      upload<{ image: ListingImage }>(`/items/${encodeURIComponent(id)}/images`, fileUri, contentType, accessToken),
+    deleteItemImage: (accessToken: string, id: string, imageId: string) =>
+      request<void>({
+        method: 'DELETE',
+        path: `/items/${encodeURIComponent(id)}/images/${encodeURIComponent(imageId)}`,
+        accessToken,
+      }),
   };
+}
+
+// The API's envelope: `data` on success, a coded ApiError otherwise.
+function unwrap<T>(status: number, payload: unknown, retryAfterHeader: string | null): T {
+  if (status >= 200 && status < 300 && isObject(payload) && payload.success === true) {
+    return payload.data as T;
+  }
+  if (isObject(payload) && payload.success === false && typeof payload.code === 'string') {
+    const retryAfter = Number(retryAfterHeader);
+    throw new ApiError(status, payload.code, typeof payload.message === 'string' ? payload.message : 'Request failed', {
+      details: payload.details,
+      requestId: typeof payload.requestId === 'string' ? payload.requestId : undefined,
+      retryAfterSeconds: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+    });
+  }
+  throw new ApiError(status, 'BAD_RESPONSE', 'The server sent an unexpected response.');
+}
+
+function queryString(query: RequestOptions['query']): string {
+  if (!query) return '';
+  const parts = Object.entries(query)
+    .filter(([, v]) => v !== undefined && v !== '')
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+  return parts.length ? `?${parts.join('&')}` : '';
 }
 
 export type ApiClient = ReturnType<typeof createApiClient>;

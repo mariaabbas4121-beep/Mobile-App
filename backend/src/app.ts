@@ -11,9 +11,11 @@ import { healthRoutes } from './routes/health.routes.js';
 import { authRoutes } from './routes/auth.routes.js';
 import { profileRoutes } from './routes/profile.routes.js';
 import { verificationRoutes } from './routes/verification.routes.js';
+import { listingRoutes } from './routes/listing.routes.js';
 import { errorHandler, notFound } from './middleware/error.middleware.js';
 import {
   createAuthLimiters,
+  createListingLimiters,
   createPhoneLimiters,
   DEFAULT_RATE_LIMITS,
   type RateLimitPolicy,
@@ -22,6 +24,8 @@ import {
   unconfiguredPhoneVerification,
   type PhoneVerificationService,
 } from './verification/phone-verification.service.js';
+import type { ListingRepository } from './listings/listing.types.js';
+import { unconfiguredListings } from './listings/supabase-listing.repository.js';
 
 export interface AppDeps {
   config: Config;
@@ -30,6 +34,8 @@ export interface AppDeps {
   profiles: ProfileRepository;
   // Absent: the phone endpoints answer 503 SERVER_NOT_CONFIGURED.
   phoneVerification?: PhoneVerificationService;
+  // Absent: the listing endpoints answer 503 SERVER_NOT_CONFIGURED.
+  listings?: ListingRepository;
   rateLimits?: RateLimitPolicy;
 }
 
@@ -39,6 +45,7 @@ export function createApp({
   authGateway,
   profiles,
   phoneVerification = unconfiguredPhoneVerification(),
+  listings = unconfiguredListings(),
   rateLimits = DEFAULT_RATE_LIMITS,
 }: AppDeps) {
   const app = express();
@@ -114,6 +121,7 @@ export function createApp({
       limiters: createPhoneLimiters(rateLimits),
     }),
   );
+  app.use('/api/v1/items', listingRoutes({ gateway: authGateway, profiles, listings, limiters: createListingLimiters(rateLimits) }));
 
   app.use(notFound);
   app.use(errorHandler);

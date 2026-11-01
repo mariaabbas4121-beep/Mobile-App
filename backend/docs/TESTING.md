@@ -33,6 +33,7 @@ They need no `.env`, network or Supabase project.
 | `slow-supabase.test.ts` | Real SDK against a server that accepts connections and never answers: login, refresh, `/me` and `/status` end with `503 AUTH_UNAVAILABLE` at the deadline; health answers at once; timing logs carry the request id and no credentials |
 | `server.test.ts` | Starts `src/server.ts` as a process: boots with valid config; exits 1 with a sanitized message on invalid config |
 | `phone-verification.test.ts` | Phone routes and service against an in-memory model of Supabase's phone-change flow: number parsing, auth and account status, start/resend/confirm success, provider disabled or misconfigured, SMS failure, numbers owned by other accounts, wrong/expired/repeated codes, other users' numbers, independent post-verification check, recovery after a lost database write, number changes, reconciliation, cooldown and double taps, per-IP/account/number limits, logs without codes |
+| `listings.routes.test.ts` | Listing endpoints with an in-memory repository: create/read/update/archive contract, rejecting client-supplied owners and unknown fields, validation of every field and query parameter, pagination, search and filters, owner-only edits and archives (403), unknown and malformed ids (404/400), account-status rules, archived listings, photo type/content/size checks (415/413), the 5-photo limit, photo ownership, rate limit |
 | `supabase-phone-auth.test.ts` | The Supabase adapter with fake HTTP and SDK: request shape (caller's token), error mapping, settings caching, revoking the session `verifyOtp` issues |
 
 ## Database tests (`tests/db`)
@@ -42,6 +43,8 @@ They need no `.env`, network or Supabase project.
 They cover signup provisioning, retries and bad metadata, email confirmation, verification transitions, provider-reference uniqueness, per-user read and update rules, protected columns, suspended accounts, anonymous access, the append-only audit log (including `TRUNCATE`), and user deletion.
 
 `phone-verification.test.ts` covers the phone functions: pending never means verified, completion only for the requested number, one user's result never touching another's, the cooldown, number changes, stale claims on a number, re-verification after revocation, audit events without numbers or codes, and that clients can neither call the functions nor write the phone columns.
+
+`listings.test.ts` covers the listings migration: only active users create, only for themselves; others' updates match nothing; ownership cannot move; archiving is server-stamped and final; no deletes; suspended owners vanish from discovery; anonymous reads expose only listing columns; `search_listings` word search (wildcards literal), filters, paging with a stable total, sorting and the page-size cap; photo rows tied to the owner's own listing and folder, not on archived listings, at most 5; and the Storage bucket's privacy, limits and upload/read/delete policies (on a minimal `storage` schema stand-in).
 
 Passing here means the migration logic is right. It does not prove the hosted project is identical; the integration suite checks that.
 
@@ -131,6 +134,21 @@ Timings over the LAN address with a throwaway user (warm, cold in brackets): hea
 - Supabase sends the Expo Go redirect (`exp://10.172.18.160:8081/--/auth/callback`) back to the app; `neighborshare://auth/callback` and `http://localhost:8081/auth/callback` are **not** allowed and fall back to the Site URL. Checked by starting an OAuth flow for each redirect and having Supabase report a denial, which redirects to the URL it accepted.
 - Both Google users in the project were created by Supabase but **never signed in** (`last_sign_in_at` empty): no code exchange ever succeeded.
 - Two client defects could each end such a sign-in silently, and are fixed with tests: Android's browser "dismiss" being taken as a cancel when the deep link arrives a moment later; and the callback screen waiting on an account load that a second delivery of the same session never reported, leaving a spinner.
+
+### Listings, Phase 2A (2026-10-28)
+
+| Check | Result |
+| --- | --- |
+| Backend type check, build | Clean |
+| `npm test` (unit + database) | 370 / 370 passed (286 earlier + 50 listing route tests + 34 listing database tests) |
+| Frontend type check | Clean (the earlier `app/lend/new.tsx` error is gone with the rewrite of that screen) |
+| Frontend tests (`npx jest`) | 202 / 202 passed (178 earlier + 24 listing tests: feed loading/empty/error/retry, server-side search and category, detail for owner and neighbor, availability toggle, archive, form validation, double tap, server field errors, photo uploads with partial failure, edit mode, API client query strings and raw uploads) |
+| `npx expo install --check` | Dependencies up to date |
+| Live API against the dev project | `/health` 200; listing reads `503 DATABASE_UNAVAILABLE` (log: `PGRST202`, function missing) because the migration is **not applied**; auth (401) and validation (400) behave as documented |
+| Listing create/update/archive/photos against Supabase | **Not tested live**: needs the migration applied and a signed-in test user |
+| Later the same day, migration applied (live, throwaway user, cleaned up) | Through the local API: create 201 with the persisted listing; on page 1 of the feed signed in and anonymous; hidden by a non-matching category; JPEG upload 201; signed URL serves the image; archive 200. Photo upload **from a phone** still untested |
+| Feed refresh after create (frontend, `listingFeedRefresh.test.tsx`) | 9 / 9: new listing appears without a full-screen spinner, one refetch per change, no duplicate request on later filter changes, filter hint with "Show all", visible failure banner, retry on returning to the tab, no request when already up to date, failed create, pull-to-refresh |
+| Integration suite for listings | **None yet** |
 
 ## Manual test: phone verification with a Supabase test number
 

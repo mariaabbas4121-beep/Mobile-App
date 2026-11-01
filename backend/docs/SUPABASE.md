@@ -9,6 +9,8 @@ Supabase Auth (`auth.users`) owns identity and credentials. Passwords, tokens an
 | `profiles` | One row per user: display name, city, neighborhood, bio, avatar path, verified and pending phone, account status, profile-completed timestamp | Signup trigger; the user (four columns only); the server |
 | `user_verifications` | One current row per user per type (`email`, `phone`, `identity`) with status, provider, opaque provider reference, timestamps | Triggers and the server only |
 | `audit_events` | Append-only log of security events with small, non-sensitive metadata | Triggers and the server only |
+| `listings` | Items offered for lending: title, description, category, condition, optional value/terms/area, availability, Teach Me flag, tags, `archived_at` | The owner (with their own token) |
+| `listing_images` | Photo metadata: listing, owner, Storage path, type, size. Files live in the private Storage bucket `listing-images` | The owner |
 
 **Onboarding is modelled as independent records**, not one sequential state. Each verification has its own status (`not_started`, `pending`, `verified`, `rejected`, `expired`, `revoked`); profile completion is a server-maintained timestamp; account status (`active`, `restricted`, `suspended`, `deletion_pending`) is separate. `GET /auth/status` derives the onboarding stage from these.
 
@@ -59,6 +61,22 @@ Audit events: `verification.phone_code_requested`, `verification.phone_code_rese
 
 All functions run with an empty `search_path` and fully qualified names, and cannot be called through the Data API.
 
+### Listings
+
+- Listings are **archived, never deleted** by users (`archived_at`, stamped by the database clock; one-way). This keeps them available for borrow history later.
+- `availability` is a simple owner-controlled flag (`available` / `unavailable`). Date-based reservations are Phase 2B.
+- At most 5 photos per listing (trigger, serialised with an advisory lock). Each photo row's path must be `<owner_id>/<listing_id>/<uuid>.<jpg|png|webp>`, and a composite foreign key ties it to a listing **owned by the same user**.
+- `search_listings(...)` (SECURITY INVOKER, so RLS applies) does filtering, word search, sorting and paging, and returns `{ total, items }`.
+- Two small SECURITY DEFINER helpers expose only what discovery needs: `listing_owner_is_listable(owner)` (boolean: account active or restricted) and `listing_owner_name(owner)` (display name, only for the caller or owners with a listing on show).
+
+| Role | `listings` | `listing_images` | Storage `listing-images` |
+| --- | --- | --- | --- |
+| `anon` | read unarchived listings of owners in good standing | read rows of visible listings | read (signed URLs) files referenced by a visible image row |
+| `authenticated` | the same, plus all own listings; insert own while `active`; update own unarchived listing while `active`/`restricted` (column grants exclude `owner_id`, `created_at`); no delete | the same, plus insert into own unarchived listing while `active`; delete own | the same, plus upload into `<own id>/<own unarchived listing id>/`; read and delete anything in `<own id>/` |
+| `service_role` | full | full | (Supabase default) |
+
+The bucket is **private** with a 5 MB limit and `image/jpeg`, `image/png`, `image/webp` only; the API enforces the same and also checks the file's first bytes.
+
 ## Access control
 
 Defence in depth: the API checks first, and the database enforces the same rules independently, so a client holding a valid token and calling Supabase directly gains nothing.
@@ -96,6 +114,7 @@ Migrations live in `supabase/migrations/` and are applied with the Supabase CLI 
 | --- | --- |
 | `20261020120000_auth_foundation.sql` | Types, tables, triggers, RLS, grants |
 | `20261020130000_tighten_service_role_grants.sql` | Makes `audit_events` append-only for `service_role` too; blocks `TRUNCATE` |
+| `20261028120000_listings.sql` | Listings, listing photos, `search_listings`, RLS, the private `listing-images` bucket and its Storage policies. **Not yet applied to the dev project** (checked 2026-10-28: `listings` returns `PGRST205`, the bucket `NoSuchBucket`). Until it is, listing reads answer `503 DATABASE_UNAVAILABLE` and photo uploads `503 STORAGE_NOT_CONFIGURED` |
 | `20261026120000_phone_verification.sql` | Phone verification columns and `phone_verification_*` functions (service role only). **Not yet applied to the dev project** (re-checked 2026-10-28: `profiles.pending_phone_e164` returns `42703 undefined_column`). Until it is, every phone endpoint answers `503 PHONE_VERIFICATION_NOT_CONFIGURED` with `reason: database_migration_missing` |
 
 Applying to the dev project, from `backend/`:
@@ -127,6 +146,12 @@ Always read the dry run first and confirm the linked project is the intended one
 - [ ] **Authentication → Rate Limits:** review the email-send limit (raise it on the dev project so the signup tests can run).
 - [ ] Revoke the personal access token when not running migrations, and clear `SUPABASE_DB_PASSWORD` from `.env`.
 - [ ] Use a separate Supabase project for production; never set `INTEGRATION_PROJECT_REF` there.
+
+### Listings (Phase 2A)
+
+- [ ] Apply `20261028120000_listings.sql` (see [Migrations](#migrations)). `db:push` will also apply the phone migration if it is still pending; read the dry run.
+- [ ] After pushing, check **Storage → Buckets**: `listing-images` exists, is **not public**, 5 MB limit, the three image types. Check **Storage → Policies** shows the three `listing-images:` policies on `objects`.
+- [ ] No new environment variables. The API uses the publishable key with each caller's token; `SUPABASE_SECRET_KEY` is not needed for listings.
 
 ### For later milestones
 

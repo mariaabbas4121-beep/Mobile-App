@@ -1,27 +1,43 @@
-import { useState, useMemo } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  TextInput, ScrollView, Image, Dimensions, Platform,
+  TextInput, ScrollView, Image, Dimensions, ActivityIndicator, RefreshControl,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useCallback } from 'react';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useApp } from '../../context/AppContext';
-import { CATEGORIES, Item } from '../../data/mockData';
+import { useListings } from '../../context/ListingsContext';
+import type { Listing, ListingCategory } from '../../lib/api/types';
+import { errorMessage } from '../../lib/auth/messages';
+import { CATEGORY_OPTIONS, conditionLabel } from '../../lib/listings/options';
+import { useListingFeed } from '../../lib/listings/useListingFeed';
 import { Colors, Typography, Spacing, Radii, Shadows } from '../../utils/theme';
 
 const { width } = Dimensions.get('window');
 const CARD_WIDTH = (width - Spacing.xl * 2 - Spacing.md) / 2;
 
-function ItemCard({ item, onPress }: { item: Item; onPress: () => void }) {
+const FILTERS: { id: 'all' | ListingCategory; label: string; icon: string }[] = [
+  { id: 'all', label: 'All', icon: '🏠' },
+  ...CATEGORY_OPTIONS.map((c) => ({ id: c.value, label: c.label, icon: c.icon })),
+];
+
+function ItemCard({ item, onPress }: { item: Listing; onPress: () => void }) {
+  const cover = item.images[0]?.url;
+  const ownerName = item.owner.displayName ?? 'Neighbor';
   return (
-    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.88}>
+    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.88} accessibilityRole="button" accessibilityLabel={item.title}>
       <View style={styles.imageWrap}>
-        <Image source={{ uri: item.image }} style={styles.cardImage} resizeMode="cover" />
-        {!item.available && (
+        {cover ? (
+          <Image source={{ uri: cover }} style={styles.cardImage} resizeMode="cover" />
+        ) : (
+          <View style={[styles.cardImage, styles.imagePlaceholder]}>
+            <Ionicons name="image-outline" size={28} color={Colors.slate} />
+          </View>
+        )}
+        {item.availability === 'unavailable' && (
           <View style={styles.unavailableOverlay}>
-            <Text style={styles.unavailableText}>In Use</Text>
+            <Text style={styles.unavailableText}>Unavailable</Text>
           </View>
         )}
         {item.teachMeEnabled && (
@@ -29,26 +45,27 @@ function ItemCard({ item, onPress }: { item: Item; onPress: () => void }) {
             <Text style={styles.teachBadgeText}>🎓</Text>
           </View>
         )}
-        <View style={styles.distanceBadge}>
-          <Ionicons name="location" size={10} color={Colors.green || "#2e7d32"} />
-          <Text style={styles.distanceText}>{item.distance}</Text>
-        </View>
+        {item.area ? (
+          <View style={styles.distanceBadge}>
+            <Ionicons name="location" size={10} color={Colors.green || "#2e7d32"} />
+            <Text style={styles.distanceText} numberOfLines={1}>{item.area}</Text>
+          </View>
+        ) : null}
       </View>
       <View style={styles.cardBody}>
         <Text style={styles.cardTitle} numberOfLines={1}>{item.title}</Text>
         <View style={styles.cardMeta}>
           <View style={[styles.conditionDot, {
-            backgroundColor: item.condition === 'Excellent' ? (Colors.green || '#2e7d32')
-              : item.condition === 'Good' ? '#4caf50' : Colors.slate
+            backgroundColor: item.condition === 'excellent' ? (Colors.green || '#2e7d32')
+              : item.condition === 'good' ? '#4caf50' : Colors.slate
           }]} />
-          <Text style={styles.cardCondition}>{item.condition}</Text>
+          <Text style={styles.cardCondition}>{conditionLabel(item.condition)}</Text>
         </View>
         <View style={styles.ownerRow}>
-          <Image source={{ uri: item.ownerAvatar }} style={styles.ownerAvatar} />
-          <Text style={styles.ownerName} numberOfLines={1}>{item.ownerName}</Text>
-          <View style={styles.trustChip}>
-            <Text style={styles.trustText}>{item.ownerTrustScore}</Text>
+          <View style={[styles.ownerAvatar, styles.ownerInitialWrap]}>
+            <Text style={styles.ownerInitial}>{ownerName.charAt(0).toUpperCase()}</Text>
           </View>
+          <Text style={styles.ownerName} numberOfLines={1}>{ownerName}</Text>
         </View>
       </View>
     </TouchableOpacity>
@@ -57,16 +74,81 @@ function ItemCard({ item, onPress }: { item: Item; onPress: () => void }) {
 
 export default function BrowseScreen() {
   const router = useRouter();
-  const { items, searchQuery, setSearchQuery, activeCategory, setActiveCategory } = useApp();
+  const { searchQuery, setSearchQuery, activeCategory, setActiveCategory } = useApp();
+  const category = activeCategory === 'all' ? null : (activeCategory as ListingCategory);
+  const feed = useListingFeed({ query: searchQuery, category });
+  const { lastCreatedId } = useListings();
 
-  const filtered = useMemo(() => {
-    return items.filter(item => {
-      const matchCat = activeCategory === 'all' || item.category.toLowerCase() === activeCategory;
-      const matchSearch = !searchQuery || item.title.toLowerCase().includes(searchQuery.toLowerCase())
-        || item.tags.some(t => t.toLowerCase().includes(searchQuery.toLowerCase()));
-      return matchCat && matchSearch;
-    });
-  }, [items, searchQuery, activeCategory]);
+  // Coming back to this tab (e.g. after listing an item) reloads only if
+  // the list is behind a change or its last background reload failed.
+  const { refreshIfStale } = feed;
+  useFocusEffect(useCallback(() => refreshIfStale(), [refreshIfStale]));
+
+  // The user's own search or category hides the item they just listed. Say
+  // so, and let them clear the filters; never change them silently.
+  const newListingHidden =
+    feed.upToDate && feed.filtered && lastCreatedId !== null && !feed.items.some((i) => i.id === lastCreatedId);
+
+  const showAll = () => {
+    setSearchQuery('');
+    setActiveCategory('all');
+  };
+
+  const renderHeader = () => (
+    <>
+      {feed.refreshError && feed.status === 'ready' ? (
+        <View style={styles.notice} accessibilityRole="alert">
+          <Text style={styles.noticeText}>Could not refresh the list. {errorMessage(feed.refreshError)}</Text>
+          <TouchableOpacity onPress={feed.refresh} accessibilityRole="button" accessibilityLabel="Refresh list">
+            <Text style={styles.noticeAction}>Refresh</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {newListingHidden ? (
+        <View style={styles.notice}>
+          <Text style={styles.noticeText}>Your new listing is hidden by the current search or category.</Text>
+          <TouchableOpacity onPress={showAll} accessibilityRole="button" accessibilityLabel="Show all items">
+            <Text style={styles.noticeAction}>Show all</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      {feed.status === 'ready' && feed.total > 0 ? (
+        <Text style={styles.resultCount}>{feed.total} {feed.total === 1 ? 'item' : 'items'} available to borrow</Text>
+      ) : null}
+    </>
+  );
+
+  const renderEmpty = () => {
+    if (feed.status === 'loading') {
+      return (
+        <View style={styles.emptyState} accessibilityLabel="Loading items">
+          <ActivityIndicator size="large" color={Colors.green || '#2e7d32'} />
+        </View>
+      );
+    }
+    if (feed.status === 'error') {
+      return (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyEmoji}>📡</Text>
+          <Text style={styles.emptyTitle}>Could not load items</Text>
+          <Text style={styles.emptyDesc}>{errorMessage(feed.error)}</Text>
+          <TouchableOpacity style={styles.retryBtn} onPress={feed.retry} accessibilityRole="button" accessibilityLabel="Try again">
+            <Text style={styles.retryText}>Try again</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    const filtered = feed.filtered;
+    return (
+      <View style={styles.emptyState}>
+        <Text style={styles.emptyEmoji}>{filtered ? '🔍' : '📦'}</Text>
+        <Text style={styles.emptyTitle}>{filtered ? 'Nothing found' : 'No items yet'}</Text>
+        <Text style={styles.emptyDesc}>
+          {filtered ? 'Try a different search or category' : 'Be the first to lend something to your neighbors'}
+        </Text>
+      </View>
+    );
+  };
 
   return (
     <View style={styles.container}>
@@ -98,9 +180,11 @@ export default function BrowseScreen() {
               value={searchQuery}
               onChangeText={setSearchQuery}
               returnKeyType="search"
+              maxLength={100}
+              accessibilityLabel="Search items"
             />
             {searchQuery ? (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
+              <TouchableOpacity onPress={() => setSearchQuery('')} accessibilityLabel="Clear search">
                 <Ionicons name="close-circle" size={18} color={Colors.slate} />
               </TouchableOpacity>
             ) : null}
@@ -108,12 +192,15 @@ export default function BrowseScreen() {
 
           {/* Categories Horizontal Scroller */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScroll} contentContainerStyle={styles.catContent}>
-            {CATEGORIES.map(cat => (
+            {FILTERS.map(cat => (
               <TouchableOpacity
                 key={cat.id}
                 style={[styles.catChip, activeCategory === cat.id && styles.catChipActive]}
                 onPress={() => setActiveCategory(cat.id)}
                 activeOpacity={0.8}
+                accessibilityRole="button"
+                accessibilityLabel={cat.label}
+                accessibilityState={{ selected: activeCategory === cat.id }}
               >
                 <Text style={styles.catIcon}>{cat.icon}</Text>
                 <Text style={[styles.catLabel, activeCategory === cat.id && styles.catLabelActive]}>
@@ -127,21 +214,22 @@ export default function BrowseScreen() {
 
       {/* Grid Results */}
       <FlatList
-        data={filtered}
+        testID="listing-feed"
+        data={feed.status === 'ready' ? feed.items : []}
         numColumns={2}
         keyExtractor={item => item.id}
         contentContainerStyle={styles.grid}
         columnWrapperStyle={styles.row}
         showsVerticalScrollIndicator={false}
-        ListHeaderComponent={
-          <Text style={styles.resultCount}>{filtered.length} items nearby</Text>
+        refreshControl={
+          <RefreshControl refreshing={feed.refreshing} onRefresh={feed.refresh} tintColor={Colors.green || '#2e7d32'} />
         }
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyEmoji}>🔍</Text>
-            <Text style={styles.emptyTitle}>Nothing found</Text>
-            <Text style={styles.emptyDesc}>Try a different search or category</Text>
-          </View>
+        onEndReached={feed.loadMore}
+        onEndReachedThreshold={0.4}
+        ListHeaderComponent={renderHeader()}
+        ListEmptyComponent={renderEmpty()}
+        ListFooterComponent={
+          feed.loadingMore ? <ActivityIndicator style={styles.footerSpinner} color={Colors.green || '#2e7d32'} /> : undefined
         }
         renderItem={({ item }) => (
           <ItemCard
@@ -199,6 +287,13 @@ const styles = StyleSheet.create({
   catLabelActive: { color: Colors.greenDark || '#1b5e20', fontWeight: Typography.weights.semibold },
   grid: { padding: Spacing.xl, paddingBottom: 100 },
   row: { justifyContent: 'space-between' },
+  notice: {
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.sm,
+    backgroundColor: '#fff8e1', borderWidth: 1, borderColor: '#ffe082',
+    borderRadius: Radii.md, padding: Spacing.md, marginBottom: Spacing.md,
+  },
+  noticeText: { flex: 1, fontSize: Typography.sizes.sm, color: Colors.greenDark || '#1b5e20' },
+  noticeAction: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.bold, color: Colors.green || '#2e7d32' },
   resultCount: { fontSize: Typography.sizes.sm, color: Colors.slate, marginBottom: Spacing.md, fontWeight: Typography.weights.medium },
   card: {
     width: CARD_WIDTH, backgroundColor: Colors.white,
@@ -209,6 +304,7 @@ const styles = StyleSheet.create({
   },
   imageWrap: { position: 'relative' },
   cardImage: { width: '100%', height: 130 },
+  imagePlaceholder: { backgroundColor: Colors.fog, alignItems: 'center', justifyContent: 'center' },
   unavailableOverlay: {
     ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(27,94,32,0.6)', // Green translucent overlay for unavailable
@@ -230,7 +326,7 @@ const styles = StyleSheet.create({
     alignItems: 'center', paddingHorizontal: 6, paddingVertical: 3, gap: 2,
     ...Shadows.sm,
   },
-  distanceText: { fontSize: 10, color: Colors.greenDark || '#1b5e20', fontWeight: Typography.weights.bold },
+  distanceText: { maxWidth: CARD_WIDTH - 60, fontSize: 10, color: Colors.greenDark || '#1b5e20', fontWeight: Typography.weights.bold },
   cardBody: { padding: Spacing.md },
   cardTitle: { fontSize: Typography.sizes.base, fontWeight: Typography.weights.semibold, color: Colors.greenDark || '#1b5e20', marginBottom: 4 },
   cardMeta: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 8 },
@@ -238,6 +334,8 @@ const styles = StyleSheet.create({
   cardCondition: { fontSize: Typography.sizes.xs, color: Colors.slate },
   ownerRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs },
   ownerAvatar: { width: 18, height: 18, borderRadius: 9 },
+  ownerInitialWrap: { backgroundColor: (Colors.green || '#2e7d32') + '25', alignItems: 'center', justifyContent: 'center' },
+  ownerInitial: { fontSize: 10, fontWeight: Typography.weights.bold, color: Colors.greenDark || '#1b5e20' },
   ownerName: { flex: 1, fontSize: Typography.sizes.xs, color: Colors.slate },
   trustChip: {
     backgroundColor: (Colors.green || '#2e7d32') + '15', borderRadius: Radii.full,
@@ -247,5 +345,11 @@ const styles = StyleSheet.create({
   emptyState: { alignItems: 'center', paddingTop: 60 },
   emptyEmoji: { fontSize: 48, marginBottom: Spacing.md },
   emptyTitle: { fontSize: Typography.sizes.lg, fontWeight: Typography.weights.bold, color: Colors.greenDark || '#1b5e20' },
-  emptyDesc: { fontSize: Typography.sizes.base, color: Colors.slate, marginTop: Spacing.xs },
+  emptyDesc: { fontSize: Typography.sizes.base, color: Colors.slate, marginTop: Spacing.xs, textAlign: 'center', paddingHorizontal: Spacing.xl },
+  retryBtn: {
+    marginTop: Spacing.lg, backgroundColor: Colors.green || '#2e7d32',
+    paddingHorizontal: Spacing.xl, paddingVertical: Spacing.sm + 2, borderRadius: Radii.full,
+  },
+  retryText: { color: Colors.white, fontWeight: Typography.weights.bold, fontSize: Typography.sizes.sm },
+  footerSpinner: { marginVertical: Spacing.lg },
 });

@@ -8,6 +8,7 @@ import { createSupabaseProfileRepository } from './auth/supabase-profile.reposit
 import { createSupabasePhoneAuth } from './verification/supabase-phone-auth.js';
 import { createSupabasePhoneVerificationStore } from './verification/supabase-phone-verification.store.js';
 import { createPhoneVerificationService } from './verification/phone-verification.service.js';
+import { createSupabaseListingRepository } from './listings/supabase-listing.repository.js';
 
 // Load .env only in the entry point, so tests decide their own environment.
 // Existing process variables take precedence over the file.
@@ -40,6 +41,8 @@ const app = createApp({
     policy: config.phoneVerification,
     logger,
   }),
+  // Runs every query with the caller's token (or anonymously); no secret key.
+  listings: createSupabaseListingRepository(supabase, logger),
 });
 
 const server = app.listen(config.port, () => {

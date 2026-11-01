@@ -7,6 +7,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import Toast from 'react-native-toast-message';
 import { AppProvider } from '../context/AppContext';
 import { AuthProvider, useAuth } from '../context/AuthContext';
+import { ListingsProvider } from '../context/ListingsContext';
 
 // Keep the native splash screen up until the saved session has been checked,
 // so neither the sign-in screens nor the app flash before the right one.
@@ -63,11 +64,13 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <AuthProvider>
-          <AppProvider>
-            <StatusBar style="light" />
-            <RootNavigator />
-            <Toast />
-          </AppProvider>
+          <ListingsProvider>
+            <AppProvider>
+              <StatusBar style="light" />
+              <RootNavigator />
+              <Toast />
+            </AppProvider>
+          </ListingsProvider>
         </AuthProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>

@@ -19,6 +19,7 @@ import type {
   PhoneVerificationStore,
 } from '../src/verification/phone.types.js';
 import { createPhoneVerificationService } from '../src/verification/phone-verification.service.js';
+import type { Caller, Listing, ListingImage, ListingRepository } from '../src/listings/listing.types.js';
 
 // Fake, syntactically valid configuration for unit tests. It points at an
 // unroutable host and contains no real key.
@@ -236,12 +237,113 @@ export function memoryPhoneStore(now: () => number = Date.now) {
   return store;
 }
 
+// --- Listing fakes -----------------------------------------------------------
+// In-memory stand-in for the listing repository with the database's access
+// rules: archived listings are visible only to their owner, and writes by
+// anyone but the owner match nothing (as Row-Level Security would).
+export function memoryListings() {
+  const rows = new Map<string, Listing>();
+  let seq = 0;
+  const id = () => `00000000-0000-4000-9000-${String(++seq).padStart(12, '0')}`;
+  const visible = (caller: Caller | null, l: Listing) => !l.archivedAt || l.owner.id === caller?.userId;
+  const owned = (caller: Caller, listingId: string) => {
+    const l = rows.get(listingId);
+    return l && l.owner.id === caller.userId && !l.archivedAt ? l : null;
+  };
+
+  const repo = {
+    rows,
+    search: vi.fn<ListingRepository['search']>(async (caller, s) => {
+      const words = (s.q ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+      let list = [...rows.values()].filter(
+        (l) =>
+          (l.archivedAt ? s.includeArchived && l.owner.id === caller?.userId : true) &&
+          (!s.category || l.category === s.category) &&
+          (!s.condition || l.condition === s.condition) &&
+          (!s.availability || l.availability === s.availability) &&
+          (!s.ownerId || l.owner.id === s.ownerId) &&
+          words.every((w) => `${l.title} ${l.description} ${l.tags.join(' ')}`.toLowerCase().includes(w)),
+      );
+      list =
+        s.sort === 'title'
+          ? list.sort((a, b) => a.title.localeCompare(b.title))
+          : s.sort === 'oldest'
+            ? list
+            : list.reverse();
+      const start = (s.page - 1) * s.pageSize;
+      return { items: list.slice(start, start + s.pageSize), total: list.length };
+    }),
+    get: vi.fn<ListingRepository['get']>(async (caller, listingId) => {
+      const l = rows.get(listingId);
+      return l && visible(caller, l) ? structuredClone(l) : null;
+    }),
+    create: vi.fn<ListingRepository['create']>(async (caller, input) => {
+      const now = new Date().toISOString();
+      const l: Listing = {
+        id: id(),
+        owner: { id: caller.userId, displayName: 'Owner' },
+        title: input.title,
+        description: input.description,
+        category: input.category,
+        condition: input.condition,
+        replacementValuePkr: input.replacementValuePkr ?? null,
+        borrowingTerms: input.borrowingTerms ?? null,
+        area: input.area ?? null,
+        availability: input.availability,
+        teachMeEnabled: input.teachMeEnabled,
+        tags: input.tags,
+        archivedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        images: [],
+      };
+      rows.set(l.id, l);
+      return structuredClone(l);
+    }),
+    update: vi.fn<ListingRepository['update']>(async (caller, listingId, changes) => {
+      const l = owned(caller, listingId);
+      if (!l) return null;
+      Object.assign(l, Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined)), {
+        updatedAt: new Date().toISOString(),
+      });
+      return structuredClone(l);
+    }),
+    archive: vi.fn<ListingRepository['archive']>(async (caller, listingId) => {
+      const l = owned(caller, listingId);
+      if (!l) return false;
+      l.archivedAt = new Date().toISOString();
+      return true;
+    }),
+    addImage: vi.fn<ListingRepository['addImage']>(async (caller, listingId, file) => {
+      const l = owned(caller, listingId);
+      if (!l) throw AppError.forbidden();
+      const image: ListingImage = {
+        id: id(),
+        url: `https://storage.test/signed/${listingId}/${l.images.length}`,
+        contentType: file.contentType,
+        createdAt: new Date().toISOString(),
+      };
+      l.images.push(image);
+      return image;
+    }),
+    removeImage: vi.fn<ListingRepository['removeImage']>(async (caller, listingId, imageId) => {
+      const l = rows.get(listingId);
+      if (!l || l.owner.id !== caller.userId) return false;
+      const before = l.images.length;
+      l.images = l.images.filter((i) => i.id !== imageId);
+      return l.images.length < before;
+    }),
+  };
+  return repo;
+}
+
 export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPolicy; now?: () => number } = {}) {
   const config = overrides.config ?? testConfig();
   const gateway = fakeGateway();
   const profiles = fakeProfiles();
   const phoneAuth = fakePhoneAuth();
   const phoneStore = memoryPhoneStore(overrides.now);
+  const listings = memoryListings();
   const app = createApp({
     config,
     logger: silentLogger,
@@ -254,7 +356,8 @@ export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPoli
       logger: silentLogger,
       ...(overrides.now ? { now: overrides.now } : {}),
     }),
+    listings,
     ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
   });
-  return { app, gateway, profiles, phoneAuth, phoneStore };
+  return { app, gateway, profiles, phoneAuth, phoneStore, listings };
 }

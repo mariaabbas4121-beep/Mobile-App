@@ -82,6 +82,71 @@ export type PhoneStartResult =
   | { verification: PhoneVerification; codeSent: true; message: string }
   | { verification: PhoneVerification; codeSent: false };
 
+// Listings (/items). Source: backend/src/listings/listing.types.ts.
+export type ListingCategory = 'tools' | 'electronics' | 'home' | 'outdoor' | 'kitchen' | 'sports' | 'books' | 'other';
+export type ListingCondition = 'excellent' | 'good' | 'fair';
+export type ListingAvailability = 'available' | 'unavailable';
+export type ListingSort = 'newest' | 'oldest' | 'title';
+
+export interface ListingImage {
+  id: string;
+  // Signed URL valid for about an hour; null if the server could not sign it.
+  url: string | null;
+  contentType: string;
+  createdAt: string;
+}
+
+export interface Listing {
+  id: string;
+  owner: { id: string; displayName: string | null };
+  title: string;
+  description: string;
+  category: ListingCategory;
+  condition: ListingCondition;
+  replacementValuePkr: number | null;
+  borrowingTerms: string | null;
+  area: string | null;
+  availability: ListingAvailability;
+  teachMeEnabled: boolean;
+  tags: string[];
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  images: ListingImage[];
+}
+
+export interface ListingInput {
+  title: string;
+  description: string;
+  category: ListingCategory;
+  condition: ListingCondition;
+  replacementValuePkr?: number | null;
+  borrowingTerms?: string | null;
+  area?: string | null;
+  availability?: ListingAvailability;
+  teachMeEnabled?: boolean;
+  tags?: string[];
+}
+
+export interface ListingQuery {
+  q?: string;
+  category?: ListingCategory;
+  condition?: ListingCondition;
+  availability?: ListingAvailability;
+  owner?: 'me';
+  includeArchived?: boolean;
+  sort?: ListingSort;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface ListingPage {
+  items: Listing[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+}
+
+export type ImageUploadType = 'image/jpeg' | 'image/png' | 'image/webp';
+
 // Codes the backend documents (backend/docs/API.md#error-codes), plus codes
 // this client produces itself when no usable response arrives.
 export type ApiErrorCode =
@@ -122,6 +187,16 @@ export type ApiErrorCode =
   | 'PHONE_VERIFICATION_UNAVAILABLE'
   | 'PHONE_VERIFICATION_NOT_CONFIGURED'
   | 'SMS_DELIVERY_UNAVAILABLE'
+  // Listings
+  | 'LISTING_NOT_FOUND'
+  | 'LISTING_ARCHIVED'
+  | 'INVALID_LISTING'
+  | 'IMAGE_NOT_FOUND'
+  | 'IMAGE_LIMIT_REACHED'
+  | 'UNSUPPORTED_IMAGE_TYPE'
+  | 'EMPTY_IMAGE'
+  | 'STORAGE_NOT_CONFIGURED'
+  | 'STORAGE_UNAVAILABLE'
   // Client-side
   | 'NETWORK_ERROR'
   | 'TIMEOUT'

@@ -26,6 +26,9 @@ export interface RateLimitPolicy {
   phoneResendPerAccount: LimitRule;
   phoneConfirmPerIp: LimitRule;
   phoneConfirmPerAccount: LimitRule;
+  // Listings. Uploads are counted separately: they are the costly writes.
+  listingCreatePerUser: LimitRule;
+  listingImageUploadPerUser: LimitRule;
 }
 
 const MINUTE = 60_000;
@@ -44,6 +47,8 @@ export const DEFAULT_RATE_LIMITS: RateLimitPolicy = {
   phoneResendPerAccount: { windowMs: 60 * MINUTE, limit: 5 },
   phoneConfirmPerIp: { windowMs: 15 * MINUTE, limit: 30 },
   phoneConfirmPerAccount: { windowMs: 15 * MINUTE, limit: 10 },
+  listingCreatePerUser: { windowMs: 60 * MINUTE, limit: 20 },
+  listingImageUploadPerUser: { windowMs: 60 * MINUTE, limit: 60 },
 };
 
 const hashKey = (prefix: string, value: string) => `${prefix}:${createHash('sha256').update(value).digest('base64url')}`;
@@ -144,5 +149,18 @@ export function createPhoneLimiters(policy: RateLimitPolicy = DEFAULT_RATE_LIMIT
     resendPerAccount: createLimiter({ name: 'phone-resend-user', rule: policy.phoneResendPerAccount, key: 'user' }),
     confirmPerIp: createLimiter({ name: 'phone-confirm-ip', rule: policy.phoneConfirmPerIp, key: 'ip' }),
     confirmPerAccount: createLimiter({ name: 'phone-confirm-user', rule: policy.phoneConfirmPerAccount, key: 'user' }),
+  };
+}
+
+export interface ListingLimiters {
+  createPerUser: RequestHandler;
+  imageUploadPerUser: RequestHandler;
+}
+
+// Mounted after requireAuth, so they count per signed-in user.
+export function createListingLimiters(policy: RateLimitPolicy = DEFAULT_RATE_LIMITS): ListingLimiters {
+  return {
+    createPerUser: createLimiter({ name: 'listing-create-user', rule: policy.listingCreatePerUser, key: 'user' }),
+    imageUploadPerUser: createLimiter({ name: 'listing-image-user', rule: policy.listingImageUploadPerUser, key: 'user' }),
   };
 }

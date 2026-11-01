@@ -1,5 +1,5 @@
 import { ApiError, type ApiClient } from '../../lib/api/client';
-import type { OnboardingStatus, PhoneVerification, Profile, Session, User } from '../../lib/api/types';
+import type { Listing, OnboardingStatus, PhoneVerification, Profile, Session, User } from '../../lib/api/types';
 import { SessionManager } from '../../lib/auth/sessionManager';
 import { createMemoryTokenStorage, type TokenStorage } from '../../lib/auth/tokenStorage';
 import type { GoogleAuth } from '../../lib/auth/googleAuth';
@@ -86,8 +86,35 @@ export function fakeApi(): FakeApi {
     confirmPhoneVerification: jest.fn(async () => ({
       verification: phoneVerification({ status: 'verified', verifiedAt: '2026-10-26T12:00:00Z', phone: '+92••••••4567' }),
     })),
+    listItems: jest.fn(async () => ({ items: [], pagination: { page: 1, pageSize: 20, total: 0, totalPages: 0 } })),
+    getItem: jest.fn(async () => ({ listing: listing() })),
+    createItem: jest.fn(async () => ({ listing: listing() })),
+    updateItem: jest.fn(async () => ({ listing: listing() })),
+    archiveItem: jest.fn(async () => ({ listing: listing({ archivedAt: '2026-10-28T12:00:00Z' }) })),
+    uploadItemImage: jest.fn(async () => ({ image: { id: 'img-1', url: 'https://storage.test/img-1', contentType: 'image/jpeg', createdAt: '2026-10-28T10:00:00Z' } })),
+    deleteItemImage: jest.fn(async () => undefined),
   };
 }
+
+export const listing = (overrides: Partial<Listing> = {}): Listing => ({
+  id: '11111111-1111-4111-8111-111111111111',
+  owner: { id: 'user-2', displayName: 'Ahmed' },
+  title: 'Bosch power drill',
+  description: 'Cordless drill with two batteries.',
+  category: 'tools',
+  condition: 'good',
+  replacementValuePkr: 15000,
+  borrowingTerms: null,
+  area: 'UAF Hostel 3',
+  availability: 'available',
+  teachMeEnabled: false,
+  tags: ['DIY'],
+  archivedAt: null,
+  createdAt: '2026-10-28T10:00:00Z',
+  updatedAt: '2026-10-28T10:00:00Z',
+  images: [],
+  ...overrides,
+});
 
 const inSeconds = (s: number) => new Date(Date.now() + s * 1000).toISOString();
 
