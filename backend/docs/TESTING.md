@@ -34,6 +34,7 @@ They need no `.env`, network or Supabase project.
 | `server.test.ts` | Starts `src/server.ts` as a process: boots with valid config; exits 1 with a sanitized message on invalid config |
 | `phone-verification.test.ts` | Phone routes and service against an in-memory model of Supabase's phone-change flow: number parsing, auth and account status, start/resend/confirm success, provider disabled or misconfigured, SMS failure, numbers owned by other accounts, wrong/expired/repeated codes, other users' numbers, independent post-verification check, recovery after a lost database write, number changes, reconciliation, cooldown and double taps, per-IP/account/number limits, logs without codes |
 | `listings.routes.test.ts` | Listing endpoints with an in-memory repository: create/read/update/archive contract, rejecting client-supplied owners and unknown fields, validation of every field and query parameter, pagination, search and filters, owner-only edits and archives (403), unknown and malformed ids (404/400), account-status rules, archived listings, photo type/content/size checks (415/413), the 5-photo limit, photo ownership, rate limit |
+| `borrow-requests.routes.test.ts` | Borrow-request endpoints with in-memory repositories: create (dates in Pakistan time, inclusive, same-day, 30-day and 90-day limits, bad formats), auth and account status, own/archived/unavailable listings, client-supplied ids rejected, overlap with accepted requests, duplicate pending, accept/decline/cancel by the right side only, outsiders get 404, every invalid transition, losing an accept race gives 409, lists and filters, booked dates, rate limit |
 | `supabase-phone-auth.test.ts` | The Supabase adapter with fake HTTP and SDK: request shape (caller's token), error mapping, settings caching, revoking the session `verifyOtp` issues |
 
 ## Database tests (`tests/db`)
@@ -45,6 +46,8 @@ They cover signup provisioning, retries and bad metadata, email confirmation, ve
 `phone-verification.test.ts` covers the phone functions: pending never means verified, completion only for the requested number, one user's result never touching another's, the cooldown, number changes, stale claims on a number, re-verification after revocation, audit events without numbers or codes, and that clients can neither call the functions nor write the phone columns.
 
 `listings.test.ts` covers the listings migration: only active users create, only for themselves; others' updates match nothing; ownership cannot move; archiving is server-stamped and final; no deletes; suspended owners vanish from discovery; anonymous reads expose only listing columns; `search_listings` word search (wildcards literal), filters, paging with a stable total, sorting and the page-size cap; photo rows tied to the owner's own listing and folder, not on archived listings, at most 5; and the Storage bucket's privacy, limits and upload/read/delete policies (on a minimal `storage` schema stand-in).
+
+`borrow-requests.test.ts` covers the borrow-request migration: lender filled from the listing and not choosable, borrower identity enforced, anonymous access refused, own/archived/unavailable/suspended-owner listings refused, the date window and limits, one pending per borrower, every allowed and forbidden transition and actor, immutable request details, account-status rules, auto-decline on archive, no deletes, and the exclusion constraint (touching inclusive ranges conflict, the next day does not, the service role and a single multi-row update cannot bypass it, declined/cancelled reserve nothing), plus both read helpers. PGlite has one connection, so two transactions cannot truly race here; the guarantee under real concurrency is PostgreSQL's exclusion constraint, which these tests show is in place and enforced.
 
 Passing here means the migration logic is right. It does not prove the hosted project is identical; the integration suite checks that.
 
@@ -149,6 +152,17 @@ Timings over the LAN address with a throwaway user (warm, cold in brackets): hea
 | Later the same day, migration applied (live, throwaway user, cleaned up) | Through the local API: create 201 with the persisted listing; on page 1 of the feed signed in and anonymous; hidden by a non-matching category; JPEG upload 201; signed URL serves the image; archive 200. Photo upload **from a phone** still untested |
 | Feed refresh after create (frontend, `listingFeedRefresh.test.tsx`) | 9 / 9: new listing appears without a full-screen spinner, one refetch per change, no duplicate request on later filter changes, filter hint with "Show all", visible failure banner, retry on returning to the tab, no request when already up to date, failed create, pull-to-refresh |
 | Integration suite for listings | **None yet** |
+
+### Borrow requests, Phase 2B (2026-11-02)
+
+| Check | Result |
+| --- | --- |
+| Backend type check, build | Clean |
+| `npm test` (unit + database) | 445 / 445 passed (370 earlier + 41 borrow route tests + 34 borrow database tests) |
+| Frontend type check | Clean |
+| Frontend tests (`npx jest`) | 239 / 239 passed (22 new: date rules, request form, item screen, requests screen) |
+| Hosted Supabase | **Migration not applied**; nothing about borrow requests was run against the hosted project |
+| Concurrent accepts on a real server | **Not run** (PGlite has one connection; the exclusion constraint is the guarantee) |
 
 ## Manual test: phone verification with a Supabase test number
 

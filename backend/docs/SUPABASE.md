@@ -10,6 +10,7 @@ Supabase Auth (`auth.users`) owns identity and credentials. Passwords, tokens an
 | `user_verifications` | One current row per user per type (`email`, `phone`, `identity`) with status, provider, opaque provider reference, timestamps | Triggers and the server only |
 | `audit_events` | Append-only log of security events with small, non-sensitive metadata | Triggers and the server only |
 | `listings` | Items offered for lending: title, description, category, condition, optional value/terms/area, availability, Teach Me flag, tags, `archived_at` | The owner (with their own token) |
+| `borrow_requests` | Requests to borrow a listing for inclusive dates: listing, lender (= listing owner), borrower, dates, optional message, status, decision/cancel times | The borrower (create, cancel) and lender (accept, decline), each with their own token |
 | `listing_images` | Photo metadata: listing, owner, Storage path, type, size. Files live in the private Storage bucket `listing-images` | The owner |
 
 **Onboarding is modelled as independent records**, not one sequential state. Each verification has its own status (`not_started`, `pending`, `verified`, `rejected`, `expired`, `revoked`); profile completion is a server-maintained timestamp; account status (`active`, `restricted`, `suspended`, `deletion_pending`) is separate. `GET /auth/status` derives the onboarding stage from these.
@@ -77,6 +78,22 @@ All functions run with an empty `search_path` and fully qualified names, and can
 
 The bucket is **private** with a 5 MB limit and `image/jpeg`, `image/png`, `image/webp` only; the API enforces the same and also checks the file's first bytes.
 
+### Borrow requests
+
+- Lifecycle `pending` → `accepted` | `declined` | `cancelled`; the three outcomes are final. A trigger enforces the transitions and who makes them (lender accepts/declines, borrower cancels; `auth.uid()` from the caller's token), stamps `decided_at` / `cancelled_at`, and forbids changing anything else about a request.
+- The lender is never chosen by the client: the insert trigger copies the listing's owner, and the composite foreign key `(listing_id, lender_id) → listings(id, owner_id)` guarantees it.
+- **No double booking:** `exclude using gist (listing_id with =, period with &&) where (status = 'accepted')`, where `period = daterange(start_date, end_date, '[]')` (both ends inclusive). Needs the `btree_gist` extension, which the migration enables in the `extensions` schema. Concurrent accepts of overlapping requests cannot both commit; the loser fails with SQLSTATE `23P01`.
+- Insert checks (trigger): listing exists, not archived, `available`, owner in good standing; not your own listing; start today..today+90 in **Asia/Karachi** (`public.borrow_today()`); no overlap with accepted requests. Table checks: end ≥ start, at most 30 days, message ≤ 500 characters. One pending request per borrower per listing (partial unique index).
+- Archiving a listing declines its pending requests (trigger); accepted ones are kept.
+- `list_borrow_requests(...)` and `listing_booked_ranges(...)` are SECURITY DEFINER read helpers: the first returns only rows where the caller is borrower or lender (with both display names and the listing title); the second returns accepted date ranges only, never who booked them.
+- Custom SQLSTATEs `NSB01`–`NSB05` are mapped to API codes in `src/borrow/supabase-borrow.repository.ts`.
+
+| Role | `borrow_requests` |
+| --- | --- |
+| `anon` | none |
+| `authenticated` | read rows where borrower or lender; insert as borrower while `active` (columns `listing_id, borrower_id, start_date, end_date, message`); update `status` only, as a participant in good standing, subject to the trigger; no delete |
+| `service_role` | full, still subject to the triggers and the exclusion constraint |
+
 ## Access control
 
 Defence in depth: the API checks first, and the database enforces the same rules independently, so a client holding a valid token and calling Supabase directly gains nothing.
@@ -114,6 +131,7 @@ Migrations live in `supabase/migrations/` and are applied with the Supabase CLI 
 | --- | --- |
 | `20261020120000_auth_foundation.sql` | Types, tables, triggers, RLS, grants |
 | `20261020130000_tighten_service_role_grants.sql` | Makes `audit_events` append-only for `service_role` too; blocks `TRUNCATE` |
+| `20261102120000_borrow_requests.sql` | Borrow requests, lifecycle triggers, the no-overlap exclusion constraint (`btree_gist`), RLS and read helpers. **Not applied to the dev project** (checked 2026-11-02: `borrow_requests` returns `PGRST205`). Until it is, borrow endpoints answer `503 DATABASE_UNAVAILABLE` |
 | `20261028120000_listings.sql` | Listings, listing photos, `search_listings`, RLS, the private `listing-images` bucket and its Storage policies. **Not yet applied to the dev project** (checked 2026-10-28: `listings` returns `PGRST205`, the bucket `NoSuchBucket`). Until it is, listing reads answer `503 DATABASE_UNAVAILABLE` and photo uploads `503 STORAGE_NOT_CONFIGURED` |
 | `20261026120000_phone_verification.sql` | Phone verification columns and `phone_verification_*` functions (service role only). **Not yet applied to the dev project** (re-checked 2026-10-28: `profiles.pending_phone_e164` returns `42703 undefined_column`). Until it is, every phone endpoint answers `503 PHONE_VERIFICATION_NOT_CONFIGURED` with `reason: database_migration_missing` |
 
@@ -146,6 +164,11 @@ Always read the dry run first and confirm the linked project is the intended one
 - [ ] **Authentication → Rate Limits:** review the email-send limit (raise it on the dev project so the signup tests can run).
 - [ ] Revoke the personal access token when not running migrations, and clear `SUPABASE_DB_PASSWORD` from `.env`.
 - [ ] Use a separate Supabase project for production; never set `INTEGRATION_PROJECT_REF` there.
+
+### Borrow requests (Phase 2B)
+
+- [ ] Apply `20261102120000_borrow_requests.sql` (`npm.cmd run db:push:dry`, read it, then `npm.cmd run db:push`). It runs `create extension if not exists btree_gist with schema extensions`; this is available on every Supabase project.
+- [ ] No new environment variables, no dashboard toggles.
 
 ### Listings (Phase 2A)
 

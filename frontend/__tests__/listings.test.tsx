@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-
 import Toast from 'react-native-toast-message';
 import { AuthProvider } from '../context/AuthContext';
 import { ListingsProvider } from '../context/ListingsContext';
+import { BorrowRequestsProvider } from '../context/BorrowRequestsContext';
 import { AppProvider } from '../context/AppContext';
 import BrowseScreen from '../app/(tabs)/index';
 import ItemDetailScreen from '../app/item/[id]';
@@ -50,7 +51,9 @@ async function renderApp(element: React.ReactElement, s = services()) {
   await render(
     <AuthProvider services={s.asServices}>
       <ListingsProvider services={{ api: s.api as unknown as ApiClient, sessionManager: s.sessionManager }}>
-        <AppProvider>{element}</AppProvider>
+        <BorrowRequestsProvider services={{ api: s.api as unknown as ApiClient, sessionManager: s.sessionManager }}>
+          <AppProvider>{element}</AppProvider>
+        </BorrowRequestsProvider>
       </ListingsProvider>
     </AuthProvider>,
   );

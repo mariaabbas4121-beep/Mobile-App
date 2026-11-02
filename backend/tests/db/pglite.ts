@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { PGlite, type Transaction } from '@electric-sql/pglite';
+import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist';
 
 // A minimal stand-in for the parts of a Supabase database the migrations rely
 // on: the API roles, auth.users, auth.uid() and Supabase's default grants on
@@ -12,6 +13,10 @@ const SUPABASE_STUB = `
   create role anon nologin noinherit;
   create role authenticated nologin noinherit;
   create role service_role nologin noinherit bypassrls;
+
+  -- Supabase installs extensions into their own schema.
+  create schema extensions;
+  grant usage on schema extensions to anon, authenticated, service_role;
 
   create schema auth;
   create table auth.users (
@@ -60,7 +65,8 @@ const SUPABASE_STUB = `
 const MIGRATIONS_DIR = join(import.meta.dirname, '..', '..', 'supabase', 'migrations');
 
 export async function createMigratedDb(): Promise<PGlite> {
-  const db = await PGlite.create();
+  // btree_gist backs the borrow-request exclusion constraint, as on Supabase.
+  const db = await PGlite.create({ extensions: { btree_gist } });
   await db.exec(SUPABASE_STUB);
   for (const file of readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort()) {
     await db.exec(readFileSync(join(MIGRATIONS_DIR, file), 'utf8'));

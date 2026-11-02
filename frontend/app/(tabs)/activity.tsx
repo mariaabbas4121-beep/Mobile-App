@@ -75,6 +75,7 @@ function TxnCard({ txn }: { txn: Transaction }) {
 }
 
 export default function ActivityScreen() {
+  const router = useRouter();
   const { transactions } = useApp();
 
   const active = transactions.filter(t => t.status !== 'Completed' && t.status !== 'Cancelled');
@@ -87,6 +88,26 @@ export default function ActivityScreen() {
         <SafeAreaView edges={['top']}>
           <Text style={styles.headerTitle}>Activity</Text>
           <Text style={styles.headerSub}>Your borrows and lends</Text>
+          <View style={styles.requestLinks}>
+            <TouchableOpacity
+              style={styles.requestLink}
+              onPress={() => router.push({ pathname: '/requests', params: { tab: 'borrowing' } })}
+              accessibilityRole="button"
+              accessibilityLabel="My borrow requests"
+            >
+              <Ionicons name="arrow-down-circle-outline" size={18} color={Colors.greenDark || '#1b5e20'} />
+              <Text style={styles.requestLinkText}>My requests</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.requestLink}
+              onPress={() => router.push({ pathname: '/requests', params: { tab: 'lending' } })}
+              accessibilityRole="button"
+              accessibilityLabel="Requests for my items"
+            >
+              <Ionicons name="arrow-up-circle-outline" size={18} color={Colors.greenDark || '#1b5e20'} />
+              <Text style={styles.requestLinkText}>Requests for my items</Text>
+            </TouchableOpacity>
+          </View>
         </SafeAreaView>
       </View>
 
@@ -135,6 +156,13 @@ export default function ActivityScreen() {
 }
 
 const styles = StyleSheet.create({
+  requestLinks: { flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.md },
+  requestLink: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    backgroundColor: '#e8f5e9', borderRadius: Radii.lg, paddingVertical: Spacing.sm + 2,
+    borderWidth: 1, borderColor: '#a5d6a7',
+  },
+  requestLinkText: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.bold, color: Colors.greenDark || '#1b5e20' },
   container: { flex: 1, backgroundColor: Colors.offWhite },
   header: { 
     paddingHorizontal: Spacing.xl, 

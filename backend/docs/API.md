@@ -8,6 +8,7 @@ This is the contract the mobile app integrates against. Everything here is imple
 - [Profile](#profile): [update](#patch-apiv1profileme)
 - [Phone verification](#phone-verification): [status](#get-apiv1verificationphone), [start](#post-apiv1verificationphonestart), [resend](#post-apiv1verificationphoneresend), [confirm](#post-apiv1verificationphoneconfirm)
 - [Listings](#listings): [list](#get-apiv1items), [get](#get-apiv1itemsid), [create](#post-apiv1items), [update](#patch-apiv1itemsid), [archive](#delete-apiv1itemsid), [add photo](#post-apiv1itemsidimages), [remove photo](#delete-apiv1itemsidimagesimageid)
+- [Borrow requests](#borrow-requests): [create](#post-apiv1borrow-requests), [lists](#get-apiv1borrow-requestsoutgoing-and-incoming), [get](#get-apiv1borrow-requestsid), [accept · decline · cancel](#post-apiv1borrow-requestsidaccept--decline--cancel), [booked dates](#get-apiv1itemsidbooked-dates)
 - [Email confirmation flow](#email-confirmation-flow)
 - [Error codes](#error-codes)
 - [Rate limits](#rate-limits)
@@ -498,6 +499,78 @@ Postman: Body → *binary* → choose the file, and set the `Content-Type` heade
 
 Token required; owner only. Removes the photo record and its file. `204`. Errors: `403 FORBIDDEN`, `404 LISTING_NOT_FOUND` / `IMAGE_NOT_FOUND`. If deleting the file itself fails, the photo is still gone from the listing and the orphaned file is logged.
 
+## Borrow requests
+
+A borrower asks to borrow a listing for a range of dates; the listing's owner (the lender) accepts or declines; the borrower can cancel while the request is pending. Payments, deposits, handover, chat and reviews are not part of this phase. Chat will only open after a request is accepted.
+
+**Lifecycle**
+
+| From | To | Who | Endpoint |
+| --- | --- | --- | --- |
+| (new) | `pending` | borrower | `POST /borrow-requests` |
+| `pending` | `accepted` | lender (account `active`) | `POST /borrow-requests/:id/accept` |
+| `pending` | `declined` | lender (`active` or `restricted`); also automatic when the listing is archived | `POST /borrow-requests/:id/decline` |
+| `pending` | `cancelled` | borrower (`active` or `restricted`) | `POST /borrow-requests/:id/cancel` |
+
+`accepted`, `declined` and `cancelled` are final. Anything else is `409 INVALID_STATUS_TRANSITION`.
+
+**Dates.** `startDate` and `endDate` are calendar dates (`YYYY-MM-DD`) in **Pakistan time**, and **both are included**: `2026-11-12`..`2026-11-14` is 3 days. Same-day borrowing is allowed (`endDate` equal to `startDate` = 1 day). The start must be today or later and at most 90 days ahead, and a request covers at most 30 days.
+
+**Reservations.** An accepted request reserves its dates. Two accepted requests for the same listing can never share a day: a borrow ending on the 14th and one starting on the 14th conflict, one starting on the 15th does not. This is enforced by a PostgreSQL exclusion constraint, so it holds even when two accepts arrive at the same moment; the second gets `409 DATES_UNAVAILABLE` and stays `pending`. Pending requests do not reserve anything, so several people can ask for the same days and the lender picks one.
+
+**Borrow request object**
+
+```json
+{
+  "id": "8c0f6d5e-2b1a-4e3f-9a7b-1c2d3e4f5a6b",
+  "status": "pending",
+  "startDate": "2026-11-12",
+  "endDate": "2026-11-14",
+  "days": 3,
+  "message": "Need it for a weekend trip",
+  "listing": { "id": "5d0c6f8e-…", "title": "Camping tent", "archived": false, "imageUrl": "https://…signed…" },
+  "borrower": { "id": "0b8e7f7e-…", "displayName": "Sara" },
+  "lender": { "id": "bb64fa7b-…", "displayName": "Rehman" },
+  "viewerRole": "borrower",
+  "createdAt": "2026-11-10T08:00:00.000Z",
+  "updatedAt": "2026-11-10T08:00:00.000Z",
+  "decidedAt": null,
+  "cancelledAt": null
+}
+```
+
+Participants see each other's id and display name only; no email, phone or address. `viewerRole` is the caller's side. `listing.imageUrl` is a one-hour signed URL, or `null`.
+
+### `POST /api/v1/borrow-requests`
+
+Token required; account `active`. Body (strict: `borrowerId`, `lenderId`, `status` are rejected):
+
+```json
+{ "listingId": "5d0c6f8e-…", "startDate": "2026-11-12", "endDate": "2026-11-14", "message": "Need it for a weekend trip" }
+```
+
+`message` is optional, up to 500 characters; blank is stored as `null`.
+
+`201 { "data": { "request": { … } } }`. Errors: `400 VALIDATION_ERROR` (format, past, too far ahead, end before start, over 30 days; `details` names the field), `401`, `403 CANNOT_BORROW_OWN_LISTING`, `403 ACCOUNT_*`, `404 LISTING_NOT_FOUND`, `409 LISTING_NOT_BORROWABLE` (archived or marked unavailable), `409 DATES_UNAVAILABLE` (overlaps an accepted request), `409 DUPLICATE_PENDING_REQUEST` (you already have a pending request for this listing), `429 RATE_LIMITED`.
+
+### `GET /api/v1/borrow-requests/outgoing` and `/incoming`
+
+Token required. `outgoing`: requests the caller made. `incoming`: requests for the caller's listings. Query: `status` (`pending`, `accepted`, `declined`, `cancelled`), `page`, `pageSize` (at most 50). Newest first.
+
+`200 { "data": { "items": [ … ], "pagination": { "page": 1, "pageSize": 20, "total": 3, "totalPages": 1 } } }`
+
+### `GET /api/v1/borrow-requests/:id`
+
+Token required; participants only. `200 { "data": { "request": { … } } }`. Anyone else gets `404 BORROW_REQUEST_NOT_FOUND`, so ids reveal nothing.
+
+### `POST /api/v1/borrow-requests/:id/accept` · `/decline` · `/cancel`
+
+Token required; body `{}`. `200 { "data": { "request": { … } } }` with the new status and `decidedAt` / `cancelledAt` set by the server. Errors: `403 FORBIDDEN` (wrong side, e.g. the borrower accepting), `404 BORROW_REQUEST_NOT_FOUND`, `409 INVALID_STATUS_TRANSITION`, and for accept `409 DATES_UNAVAILABLE` or `409 LISTING_NOT_BORROWABLE` (listing archived).
+
+### `GET /api/v1/items/:id/booked-dates`
+
+Public, token optional. Accepted ranges from today on, for the request form: `200 { "data": { "bookedDates": [ { "startDate": "2026-11-12", "endDate": "2026-11-14" } ] } }`. Dates only, never who booked them. `404 LISTING_NOT_FOUND` for listings the caller cannot see.
+
 ## Email confirmation flow
 
 1. The app calls `POST /auth/signup` and shows the `202` message.
@@ -535,6 +608,13 @@ The API has no endpoint for step 2: Supabase handles the link itself. How the mo
 | 404 | `ROUTE_NOT_FOUND` | Unknown path or method |
 | 404 | `LISTING_NOT_FOUND` | Listings: no such listing, or archived and not yours |
 | 404 | `IMAGE_NOT_FOUND` | Listing photo delete |
+| 404 | `BORROW_REQUEST_NOT_FOUND` | Borrow requests: no such request, or you are not a participant |
+| 403 | `CANNOT_BORROW_OWN_LISTING` | Borrow request for your own listing |
+| 409 | `LISTING_NOT_BORROWABLE` | Borrow request for an archived or unavailable listing; accept on an archived listing |
+| 409 | `DATES_UNAVAILABLE` | Borrow request or accept overlapping an accepted request |
+| 409 | `DUPLICATE_PENDING_REQUEST` | You already have a pending request for this listing |
+| 409 | `INVALID_STATUS_TRANSITION` | Accept/decline/cancel on a request that is no longer pending |
+| 400 | `INVALID_DATES` | Database refused the dates (normally caught first as `VALIDATION_ERROR`) |
 | 409 | `LISTING_ARCHIVED` | Listings: change or photo upload on an archived listing |
 | 409 | `IMAGE_LIMIT_REACHED` | Listing photo upload: already 5 photos |
 | 400 | `INVALID_LISTING` | Listings: a database constraint refused a value |
@@ -577,6 +657,7 @@ Limits are per API process. Several instances behind a load balancer need a shar
 | `POST /verification/phone/confirm` | 10 / 15 min | Account |
 | `POST /items` | 20 / hour | Account |
 | `POST /items/:id/images` | 60 / hour | Account |
+| `POST /borrow-requests` | 20 / hour | Account |
 | Phone start + resend | 1 SMS per `PHONE_OTP_RESEND_COOLDOWN_SECONDS` (default 60 s) | Account; **stored in the database**, so it holds across API instances and makes double taps safe |
 
 IPv6 clients are grouped by /56. Behind a reverse proxy, set `TRUST_PROXY_HOPS` so the real client IP is used. Supabase applies its own limits as well (notably on sending email and SMS, and on OTP verifications per IP); those also surface as `429 RATE_LIMITED`. Phone limits are keyed by a hash of the user id or number, never the raw value, and never include the code.

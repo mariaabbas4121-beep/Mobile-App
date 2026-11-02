@@ -1,5 +1,10 @@
 import type {
   ApiErrorCode,
+  BorrowRequest,
+  BorrowRequestInput,
+  BorrowRequestPage,
+  BorrowStatus,
+  DateRange,
   FieldIssue,
   ImageUploadType,
   Listing,
@@ -250,6 +255,32 @@ export function createApiClient({
     // or blob: on the web).
     uploadItemImage: (accessToken: string, id: string, fileUri: string, contentType: ImageUploadType) =>
       upload<{ image: ListingImage }>(`/items/${encodeURIComponent(id)}/images`, fileUri, contentType, accessToken),
+    // Public; dates only. Used to grey out booked days in the request form.
+    getBookedDates: (id: string, accessToken?: string) =>
+      request<{ bookedDates: DateRange[] }>({
+        method: 'GET',
+        path: `/items/${encodeURIComponent(id)}/booked-dates`,
+        ...(accessToken ? { accessToken } : {}),
+      }),
+
+    // Borrow requests. The borrower and lender always come from the token
+    // and the listing on the server.
+    createBorrowRequest: (accessToken: string, input: BorrowRequestInput) =>
+      request<{ request: BorrowRequest }>({ method: 'POST', path: '/borrow-requests', body: input, accessToken }),
+    listOutgoingRequests: (accessToken: string, query: { status?: BorrowStatus; page?: number; pageSize?: number } = {}) =>
+      request<BorrowRequestPage>({ method: 'GET', path: '/borrow-requests/outgoing', query: { ...query }, accessToken }),
+    listIncomingRequests: (accessToken: string, query: { status?: BorrowStatus; page?: number; pageSize?: number } = {}) =>
+      request<BorrowRequestPage>({ method: 'GET', path: '/borrow-requests/incoming', query: { ...query }, accessToken }),
+    getBorrowRequest: (accessToken: string, id: string) =>
+      request<{ request: BorrowRequest }>({ method: 'GET', path: `/borrow-requests/${encodeURIComponent(id)}`, accessToken }),
+    decideBorrowRequest: (accessToken: string, id: string, action: 'accept' | 'decline' | 'cancel') =>
+      request<{ request: BorrowRequest }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(id)}/${action}`,
+        body: {},
+        accessToken,
+      }),
+
     deleteItemImage: (accessToken: string, id: string, imageId: string) =>
       request<void>({
         method: 'DELETE',

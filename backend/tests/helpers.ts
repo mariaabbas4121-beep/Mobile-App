@@ -20,6 +20,8 @@ import type {
 } from '../src/verification/phone.types.js';
 import { createPhoneVerificationService } from '../src/verification/phone-verification.service.js';
 import type { Caller, Listing, ListingImage, ListingRepository } from '../src/listings/listing.types.js';
+import type { BorrowRequest, BorrowRequestRepository, BorrowStatus } from '../src/borrow/borrow.types.js';
+import { inclusiveDays, rangesOverlap } from '../src/borrow/dates.js';
 
 // Fake, syntactically valid configuration for unit tests. It points at an
 // unroutable host and contains no real key.
@@ -337,6 +339,112 @@ export function memoryListings() {
   return repo;
 }
 
+// --- Borrow-request fakes ---------------------------------------------------
+// In-memory stand-in with the database's rules: participants only, lender
+// taken from the listing, one pending request per borrower per listing,
+// transitions only from pending by the right side, and no overlapping
+// accepted requests (the exclusion constraint).
+export function memoryBorrowRequests(listings: ReturnType<typeof memoryListings>) {
+  interface Row {
+    id: string;
+    listingId: string;
+    lenderId: string;
+    borrowerId: string;
+    startDate: string;
+    endDate: string;
+    message: string | null;
+    status: BorrowStatus;
+    createdAt: string;
+    updatedAt: string;
+    decidedAt: string | null;
+    cancelledAt: string | null;
+  }
+  const rows = new Map<string, Row>();
+  let seq = 0;
+  let clock = Date.parse('2026-11-01T00:00:00Z');
+  const stamp = () => new Date((clock += 1000)).toISOString();
+
+  const view = (r: Row, viewerId: string): BorrowRequest => {
+    const l = listings.rows.get(r.listingId)!;
+    return {
+      id: r.id,
+      status: r.status,
+      startDate: r.startDate,
+      endDate: r.endDate,
+      days: inclusiveDays(r.startDate, r.endDate),
+      message: r.message,
+      listing: { id: l.id, title: l.title, archived: Boolean(l.archivedAt), imageUrl: l.images[0]?.url ?? null },
+      borrower: { id: r.borrowerId, displayName: 'Borrower' },
+      lender: { id: r.lenderId, displayName: 'Lender' },
+      viewerRole: r.borrowerId === viewerId ? 'borrower' : 'lender',
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      decidedAt: r.decidedAt,
+      cancelledAt: r.cancelledAt,
+    };
+  };
+  const party = (caller: Caller, r: Row) => r.borrowerId === caller.userId || r.lenderId === caller.userId;
+  const accepted = (listingId: string) => [...rows.values()].filter((r) => r.listingId === listingId && r.status === 'accepted');
+
+  const repo = {
+    rows,
+    list: vi.fn<BorrowRequestRepository['list']>(async (caller, { role, status, page, pageSize }) => {
+      const mine = [...rows.values()]
+        .filter((r) => (role === 'borrower' ? r.borrowerId : r.lenderId) === caller.userId)
+        .filter((r) => !status || r.status === status)
+        .reverse();
+      return { items: mine.slice((page - 1) * pageSize, page * pageSize).map((r) => view(r, caller.userId)), total: mine.length };
+    }),
+    get: vi.fn<BorrowRequestRepository['get']>(async (caller, id) => {
+      const r = rows.get(id);
+      return r && party(caller, r) ? view(r, caller.userId) : null;
+    }),
+    create: vi.fn<BorrowRequestRepository['create']>(async (caller, input) => {
+      const l = listings.rows.get(input.listingId);
+      if (!l || l.archivedAt || l.availability !== 'available') throw AppError.conflict('LISTING_NOT_BORROWABLE', 'x');
+      if (l.owner.id === caller.userId) throw AppError.forbidden('x', 'CANNOT_BORROW_OWN_LISTING');
+      if ([...rows.values()].some((r) => r.listingId === l.id && r.borrowerId === caller.userId && r.status === 'pending')) {
+        throw AppError.conflict('DUPLICATE_PENDING_REQUEST', 'x');
+      }
+      if (accepted(l.id).some((r) => rangesOverlap(r, input))) throw AppError.conflict('DATES_UNAVAILABLE', 'x');
+      const now = stamp();
+      const r: Row = {
+        id: `00000000-0000-4000-a000-${String(++seq).padStart(12, '0')}`,
+        listingId: l.id,
+        lenderId: l.owner.id,
+        borrowerId: caller.userId,
+        startDate: input.startDate,
+        endDate: input.endDate,
+        message: input.message,
+        status: 'pending',
+        createdAt: now,
+        updatedAt: now,
+        decidedAt: null,
+        cancelledAt: null,
+      };
+      rows.set(r.id, r);
+      return view(r, caller.userId);
+    }),
+    setStatus: vi.fn<BorrowRequestRepository['setStatus']>(async (caller, id, status) => {
+      const r = rows.get(id);
+      if (!r || !party(caller, r)) return null;
+      if (r.status !== 'pending') throw AppError.conflict('INVALID_STATUS_TRANSITION', 'x');
+      const actorOk = status === 'cancelled' ? r.borrowerId === caller.userId : r.lenderId === caller.userId;
+      if (!actorOk) throw AppError.forbidden();
+      if (status === 'accepted' && accepted(r.listingId).some((a) => rangesOverlap(a, r))) {
+        throw AppError.conflict('DATES_UNAVAILABLE', 'x');
+      }
+      const now = stamp();
+      Object.assign(r, { status, updatedAt: now }, status === 'cancelled' ? { cancelledAt: now } : { decidedAt: now });
+      return view(r, caller.userId);
+    }),
+    bookedRanges: vi.fn<BorrowRequestRepository['bookedRanges']>(async (_caller, listingId) =>
+      accepted(listingId).map((r) => ({ startDate: r.startDate, endDate: r.endDate })),
+    ),
+  };
+  return repo;
+}
+
 export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPolicy; now?: () => number } = {}) {
   const config = overrides.config ?? testConfig();
   const gateway = fakeGateway();
@@ -344,6 +452,7 @@ export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPoli
   const phoneAuth = fakePhoneAuth();
   const phoneStore = memoryPhoneStore(overrides.now);
   const listings = memoryListings();
+  const borrowRequests = memoryBorrowRequests(listings);
   const app = createApp({
     config,
     logger: silentLogger,
@@ -357,7 +466,9 @@ export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPoli
       ...(overrides.now ? { now: overrides.now } : {}),
     }),
     listings,
+    borrowRequests,
+    ...(overrides.now ? { now: overrides.now } : {}),
     ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
   });
-  return { app, gateway, profiles, phoneAuth, phoneStore, listings };
+  return { app, gateway, profiles, phoneAuth, phoneStore, listings, borrowRequests };
 }

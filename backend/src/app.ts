@@ -12,9 +12,11 @@ import { authRoutes } from './routes/auth.routes.js';
 import { profileRoutes } from './routes/profile.routes.js';
 import { verificationRoutes } from './routes/verification.routes.js';
 import { listingRoutes } from './routes/listing.routes.js';
+import { borrowRequestRoutes, listingBookingRoutes } from './routes/borrow-request.routes.js';
 import { errorHandler, notFound } from './middleware/error.middleware.js';
 import {
   createAuthLimiters,
+  createBorrowLimiters,
   createListingLimiters,
   createPhoneLimiters,
   DEFAULT_RATE_LIMITS,
@@ -26,6 +28,8 @@ import {
 } from './verification/phone-verification.service.js';
 import type { ListingRepository } from './listings/listing.types.js';
 import { unconfiguredListings } from './listings/supabase-listing.repository.js';
+import type { BorrowRequestRepository } from './borrow/borrow.types.js';
+import { unconfiguredBorrowRequests } from './borrow/supabase-borrow.repository.js';
 
 export interface AppDeps {
   config: Config;
@@ -36,6 +40,10 @@ export interface AppDeps {
   phoneVerification?: PhoneVerificationService;
   // Absent: the listing endpoints answer 503 SERVER_NOT_CONFIGURED.
   listings?: ListingRepository;
+  // Absent: the borrow-request endpoints answer 503 SERVER_NOT_CONFIGURED.
+  borrowRequests?: BorrowRequestRepository;
+  // Clock for date rules (tests pin it).
+  now?: () => number;
   rateLimits?: RateLimitPolicy;
 }
 
@@ -46,6 +54,8 @@ export function createApp({
   profiles,
   phoneVerification = unconfiguredPhoneVerification(),
   listings = unconfiguredListings(),
+  borrowRequests = unconfiguredBorrowRequests(),
+  now = Date.now,
   rateLimits = DEFAULT_RATE_LIMITS,
 }: AppDeps) {
   const app = express();
@@ -120,6 +130,12 @@ export function createApp({
       phone: phoneVerification,
       limiters: createPhoneLimiters(rateLimits),
     }),
+  );
+  // Before listingRoutes: GET /items/:id/booked-dates.
+  app.use('/api/v1/items', listingBookingRoutes({ gateway: authGateway, listings, borrowRequests }));
+  app.use(
+    '/api/v1/borrow-requests',
+    borrowRequestRoutes({ gateway: authGateway, profiles, listings, borrowRequests, limiters: createBorrowLimiters(rateLimits), now }),
   );
   app.use('/api/v1/items', listingRoutes({ gateway: authGateway, profiles, listings, limiters: createListingLimiters(rateLimits) }));
 

@@ -84,6 +84,20 @@ export function errorMessage(err: unknown): string {
       return 'That photo could not be used. Choose a JPEG, PNG or WebP image.';
     case 'PAYLOAD_TOO_LARGE':
       return 'That photo is too large. Choose one under 5 MB.';
+    case 'CANNOT_BORROW_OWN_LISTING':
+      return 'You cannot borrow your own item.';
+    case 'LISTING_NOT_BORROWABLE':
+      return 'This item cannot be borrowed right now.';
+    case 'DATES_UNAVAILABLE':
+      return 'Those dates are already booked. Choose different dates.';
+    case 'DUPLICATE_PENDING_REQUEST':
+      return 'You already have a pending request for this item. Cancel it first to ask for different dates.';
+    case 'INVALID_STATUS_TRANSITION':
+      return 'This request has already been answered or cancelled.';
+    case 'INVALID_DATES':
+      return 'Those dates cannot be requested. Choose dates from today onwards.';
+    case 'BORROW_REQUEST_NOT_FOUND':
+      return 'This request no longer exists.';
     case 'STORAGE_NOT_CONFIGURED':
     case 'STORAGE_UNAVAILABLE':
       return 'Photo uploads are not available right now. Please try again later.';

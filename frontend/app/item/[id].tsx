@@ -8,10 +8,10 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Toast from 'react-native-toast-message';
-import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { useListings } from '../../context/ListingsContext';
 import { useSubmit } from '../../components/auth/useSubmit';
+import { BorrowRequestSheet } from '../../components/borrow/BorrowRequestSheet';
 import { isApiError } from '../../lib/api/client';
 import type { Listing } from '../../lib/api/types';
 import { errorMessage } from '../../lib/auth/messages';
@@ -23,15 +23,13 @@ const { width, height } = Dimensions.get('window');
 export default function ItemDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const { requestBorrow } = useApp();
   const { user } = useAuth();
   const listings = useListings();
 
   const [item, setItem] = useState<Listing | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState<unknown>(null);
-  const [teachMe, setTeachMe] = useState(false);
-  const [requesting, setRequesting] = useState(false);
+  const [requestOpen, setRequestOpen] = useState(false);
 
   // Always shows the server's copy; availability is never decided locally.
   const load = useCallback(
@@ -129,24 +127,11 @@ export default function ItemDetailScreen() {
   const ownerName = item.owner.displayName ?? 'Neighbor';
   const photos = item.images.filter((img) => img.url);
 
-  // Borrow requests are still the on-device prototype (Phase 2B makes them
-  // real); the owner is not notified.
-  const handleRequest = () => {
-    if (!available) return;
-    setRequesting(true);
-    setTimeout(() => {
-      requestBorrow(
-        { id: item.id, title: item.title, image: photos[0]?.url ?? '', ownerId: item.owner.id, ownerName },
-        teachMe,
-      );
-      setRequesting(false);
-      Toast.show({
-        type: 'success',
-        text1: 'Request saved (preview)',
-        text2: 'Borrow requests are not sent to owners yet',
-      });
-      router.replace('/(tabs)/activity');
-    }, 600);
+  // The request goes to the server; the owner sees it under Lending.
+  const onRequested = () => {
+    setRequestOpen(false);
+    Toast.show({ type: 'success', text1: 'Request sent', text2: `${ownerName} can now accept or decline it` });
+    router.push({ pathname: '/requests', params: { tab: 'borrowing' } });
   };
 
   return (
@@ -303,28 +288,6 @@ export default function ItemDetailScreen() {
             </View>
           </View>
 
-          {/* Teach Me option */}
-          {item.teachMeEnabled && !isOwnItem && (
-            <View style={styles.section}>
-              <TouchableOpacity
-                style={[styles.teachToggle, teachMe && styles.teachToggleActive]}
-                onPress={() => setTeachMe(v => !v)}
-                activeOpacity={0.8}
-              >
-                <View style={styles.teachToggleLeft}>
-                  <Text style={styles.teachToggleIcon}>🎓</Text>
-                  <View>
-                    <Text style={styles.teachToggleTitle}>Add "Teach Me" Session</Text>
-                    <Text style={styles.teachToggleSub}>15-min demo from the owner. Earn a skill badge!</Text>
-                  </View>
-                </View>
-                <View style={[styles.toggle, teachMe && styles.toggleOn]}>
-                  <View style={[styles.toggleThumb, teachMe && styles.toggleThumbOn]} />
-                </View>
-              </TouchableOpacity>
-            </View>
-          )}
-
           <View style={{ height: 120 }} />
         </View>
       </ScrollView>
@@ -375,9 +338,12 @@ export default function ItemDetailScreen() {
             </View>
             <TouchableOpacity
               style={[styles.borrowBtn, !available && styles.borrowBtnDisabled]}
-              onPress={handleRequest}
+              onPress={() => setRequestOpen(true)}
               activeOpacity={0.85}
-              disabled={!available || requesting}
+              disabled={!available}
+              accessibilityRole="button"
+              accessibilityLabel={available ? 'Request to borrow' : 'Not available'}
+              accessibilityState={{ disabled: !available }}
             >
               <LinearGradient
                 colors={available ? [Colors.amber, Colors.amberDark] : [Colors.slate, Colors.slate]}
@@ -385,12 +351,20 @@ export default function ItemDetailScreen() {
                 start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
               >
                 <Text style={styles.borrowBtnText}>
-                  {requesting ? 'Sending…' : !available ? 'Not Available' : 'Request to Borrow'}
+                  {!available ? 'Not Available' : 'Request to Borrow'}
                 </Text>
               </LinearGradient>
             </TouchableOpacity>
           </View>
         </View>
+      )}
+      {!isOwnItem && available && (
+        <BorrowRequestSheet
+          visible={requestOpen}
+          listing={{ id: item.id, title: item.title }}
+          onClose={() => setRequestOpen(false)}
+          onSubmitted={onRequested}
+        />
       )}
     </View>
   );

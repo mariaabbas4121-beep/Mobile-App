@@ -147,6 +147,45 @@ export interface ListingPage {
 
 export type ImageUploadType = 'image/jpeg' | 'image/png' | 'image/webp';
 
+// Borrow requests (/borrow-requests). Source: backend/src/borrow/borrow.types.ts.
+export type BorrowStatus = 'pending' | 'accepted' | 'declined' | 'cancelled';
+export type BorrowRole = 'borrower' | 'lender';
+
+// Inclusive calendar dates, YYYY-MM-DD.
+export interface DateRange {
+  startDate: string;
+  endDate: string;
+}
+
+export interface BorrowRequest {
+  id: string;
+  status: BorrowStatus;
+  startDate: string;
+  endDate: string;
+  days: number;
+  message: string | null;
+  listing: { id: string; title: string; archived: boolean; imageUrl: string | null };
+  borrower: { id: string; displayName: string | null };
+  lender: { id: string; displayName: string | null };
+  viewerRole: BorrowRole;
+  createdAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
+  cancelledAt: string | null;
+}
+
+export interface BorrowRequestInput {
+  listingId: string;
+  startDate: string;
+  endDate: string;
+  message?: string | null;
+}
+
+export interface BorrowRequestPage {
+  items: BorrowRequest[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+}
+
 // Codes the backend documents (backend/docs/API.md#error-codes), plus codes
 // this client produces itself when no usable response arrives.
 export type ApiErrorCode =
@@ -197,6 +236,14 @@ export type ApiErrorCode =
   | 'EMPTY_IMAGE'
   | 'STORAGE_NOT_CONFIGURED'
   | 'STORAGE_UNAVAILABLE'
+  // Borrow requests
+  | 'BORROW_REQUEST_NOT_FOUND'
+  | 'CANNOT_BORROW_OWN_LISTING'
+  | 'LISTING_NOT_BORROWABLE'
+  | 'DATES_UNAVAILABLE'
+  | 'DUPLICATE_PENDING_REQUEST'
+  | 'INVALID_STATUS_TRANSITION'
+  | 'INVALID_DATES'
   // Client-side
   | 'NETWORK_ERROR'
   | 'TIMEOUT'
