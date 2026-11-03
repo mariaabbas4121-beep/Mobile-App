@@ -1,5 +1,5 @@
 import { ApiError, type ApiClient } from '../../lib/api/client';
-import type { BorrowRequest, Listing, OnboardingStatus, PhoneVerification, Profile, Session, User } from '../../lib/api/types';
+import type { BorrowRequest, ChatMessage, Conversation, Listing, OnboardingStatus, PhoneVerification, Profile, Session, User } from '../../lib/api/types';
 import { SessionManager } from '../../lib/auth/sessionManager';
 import { createMemoryTokenStorage, type TokenStorage } from '../../lib/auth/tokenStorage';
 import type { GoogleAuth } from '../../lib/auth/googleAuth';
@@ -99,8 +99,45 @@ export function fakeApi(): FakeApi {
     listIncomingRequests: jest.fn(async () => ({ items: [], pagination: { page: 1, pageSize: 20, total: 0, totalPages: 0 } })),
     getBorrowRequest: jest.fn(async () => ({ request: borrowRequest() })),
     decideBorrowRequest: jest.fn(async () => ({ request: borrowRequest() })),
+    listConversations: jest.fn(async () => ({ items: [], pagination: { page: 1, pageSize: 50, total: 0, totalPages: 0 } })),
+    openConversation: jest.fn(async () => ({ conversation: conversation() })),
+    getConversation: jest.fn(async () => ({ conversation: conversation() })),
+    listMessages: jest.fn(async () => ({ items: [], nextCursor: null })),
+    sendMessage: jest.fn(async (_t: string, id: string, input: { clientId: string; body: string }) => ({
+      message: chatMessage({ conversationId: id, clientId: input.clientId, body: input.body, senderId: 'user-1' }),
+      duplicate: false,
+    })),
+    markConversationRead: jest.fn(async () => ({ conversation: conversation({ unreadCount: 0 }) })),
   };
 }
+
+export const conversation = (overrides: Partial<Conversation> = {}): Conversation => ({
+  id: '55555555-5555-4555-8555-555555555555',
+  borrowRequestId: '44444444-4444-4444-8444-444444444444',
+  viewerRole: 'borrower',
+  request: { id: '44444444-4444-4444-8444-444444444444', status: 'accepted', startDate: '2026-11-12', endDate: '2026-11-14' },
+  listing: { id: '11111111-1111-4111-8111-111111111111', title: 'Bosch power drill', archived: false, imageUrl: null },
+  otherParticipant: { id: 'user-2', displayName: 'Ahmed' },
+  lastMessage: null,
+  unreadCount: 0,
+  lastMessageAt: null,
+  createdAt: '2026-11-10T09:00:00Z',
+  ...overrides,
+});
+
+let messageSeq = 0;
+export const chatMessage = (overrides: Partial<ChatMessage> = {}): ChatMessage => {
+  messageSeq += 1;
+  return {
+    id: `msg-${messageSeq}`,
+    conversationId: '55555555-5555-4555-8555-555555555555',
+    senderId: 'user-2',
+    body: `Message ${messageSeq}`,
+    clientId: `client-${messageSeq}`,
+    createdAt: new Date(Date.parse('2026-11-10T10:00:00Z') + messageSeq * 60_000).toISOString(),
+    ...overrides,
+  };
+};
 
 export const borrowRequest = (overrides: Partial<BorrowRequest> = {}): BorrowRequest => ({
   id: '44444444-4444-4444-8444-444444444444',

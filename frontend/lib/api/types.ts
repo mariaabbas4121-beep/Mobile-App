@@ -186,6 +186,41 @@ export interface BorrowRequestPage {
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
 }
 
+// Chat (/conversations). Source: backend/src/chat/chat.types.ts.
+export interface ChatMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  body: string;
+  // The sender's idempotency key.
+  clientId: string;
+  createdAt: string;
+}
+
+export interface Conversation {
+  id: string;
+  borrowRequestId: string;
+  viewerRole: BorrowRole;
+  request: { id: string; status: BorrowStatus; startDate: string; endDate: string };
+  listing: { id: string; title: string; archived: boolean; imageUrl: string | null };
+  otherParticipant: { id: string; displayName: string | null };
+  lastMessage: { id: string; senderId: string; body: string; createdAt: string } | null;
+  unreadCount: number;
+  lastMessageAt: string | null;
+  createdAt: string;
+}
+
+export interface ConversationPage {
+  items: Conversation[];
+  pagination: { page: number; pageSize: number; total: number; totalPages: number };
+}
+
+// Newest first; pass nextCursor as `before` for older messages.
+export interface MessagePage {
+  items: ChatMessage[];
+  nextCursor: string | null;
+}
+
 // Codes the backend documents (backend/docs/API.md#error-codes), plus codes
 // this client produces itself when no usable response arrives.
 export type ApiErrorCode =
@@ -244,6 +279,11 @@ export type ApiErrorCode =
   | 'DUPLICATE_PENDING_REQUEST'
   | 'INVALID_STATUS_TRANSITION'
   | 'INVALID_DATES'
+  // Chat
+  | 'CONVERSATION_NOT_FOUND'
+  | 'CHAT_NOT_AVAILABLE'
+  | 'CLIENT_ID_REUSED'
+  | 'INVALID_MESSAGE'
   // Client-side
   | 'NETWORK_ERROR'
   | 'TIMEOUT'

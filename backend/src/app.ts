@@ -30,6 +30,8 @@ import type { ListingRepository } from './listings/listing.types.js';
 import { unconfiguredListings } from './listings/supabase-listing.repository.js';
 import type { BorrowRequestRepository } from './borrow/borrow.types.js';
 import { unconfiguredBorrowRequests } from './borrow/supabase-borrow.repository.js';
+import { unconfiguredChatService, type ChatService } from './chat/chat.service.js';
+import { conversationRoutes } from './routes/conversation.routes.js';
 
 export interface AppDeps {
   config: Config;
@@ -42,6 +44,9 @@ export interface AppDeps {
   listings?: ListingRepository;
   // Absent: the borrow-request endpoints answer 503 SERVER_NOT_CONFIGURED.
   borrowRequests?: BorrowRequestRepository;
+  // Shared with the Socket.IO server (src/realtime/chat.socket.ts). Absent:
+  // the chat endpoints answer 503 SERVER_NOT_CONFIGURED.
+  chat?: ChatService;
   // Clock for date rules (tests pin it).
   now?: () => number;
   rateLimits?: RateLimitPolicy;
@@ -55,6 +60,7 @@ export function createApp({
   phoneVerification = unconfiguredPhoneVerification(),
   listings = unconfiguredListings(),
   borrowRequests = unconfiguredBorrowRequests(),
+  chat = unconfiguredChatService(profiles, logger),
   now = Date.now,
   rateLimits = DEFAULT_RATE_LIMITS,
 }: AppDeps) {
@@ -137,6 +143,7 @@ export function createApp({
     '/api/v1/borrow-requests',
     borrowRequestRoutes({ gateway: authGateway, profiles, listings, borrowRequests, limiters: createBorrowLimiters(rateLimits), now }),
   );
+  app.use('/api/v1/conversations', conversationRoutes({ gateway: authGateway, chat }));
   app.use('/api/v1/items', listingRoutes({ gateway: authGateway, profiles, listings, limiters: createListingLimiters(rateLimits) }));
 
   app.use(notFound);

@@ -31,6 +31,8 @@ export interface RateLimitPolicy {
   listingImageUploadPerUser: LimitRule;
   // Borrow requests: creating one notifies a lender, so it is capped.
   borrowRequestCreatePerUser: LimitRule;
+  // Chat messages, over REST and the socket together (see chat.service.ts).
+  chatMessagePerUser: LimitRule;
 }
 
 const MINUTE = 60_000;
@@ -52,6 +54,7 @@ export const DEFAULT_RATE_LIMITS: RateLimitPolicy = {
   listingCreatePerUser: { windowMs: 60 * MINUTE, limit: 20 },
   listingImageUploadPerUser: { windowMs: 60 * MINUTE, limit: 60 },
   borrowRequestCreatePerUser: { windowMs: 60 * MINUTE, limit: 20 },
+  chatMessagePerUser: { windowMs: MINUTE, limit: 30 },
 };
 
 const hashKey = (prefix: string, value: string) => `${prefix}:${createHash('sha256').update(value).digest('base64url')}`;

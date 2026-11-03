@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-
 import { AuthProvider } from '../context/AuthContext';
 import { ListingsProvider } from '../context/ListingsContext';
 import { BorrowRequestsProvider } from '../context/BorrowRequestsContext';
+import { ChatProvider } from '../context/ChatContext';
 import { AppProvider } from '../context/AppContext';
 import { BorrowRequestSheet } from '../components/borrow/BorrowRequestSheet';
 import ItemDetailScreen from '../app/item/[id]';
@@ -36,7 +37,9 @@ async function renderApp(element: React.ReactElement, api = fakeApi()) {
     <AuthProvider services={s.asServices}>
       <ListingsProvider services={svc}>
         <BorrowRequestsProvider services={svc}>
-          <AppProvider>{element}</AppProvider>
+          <ChatProvider services={{ ...svc, socket: null, newId: () => 'client-id' }}>
+            <AppProvider>{element}</AppProvider>
+          </ChatProvider>
         </BorrowRequestsProvider>
       </ListingsProvider>
     </AuthProvider>,
@@ -304,11 +307,27 @@ describe('borrow requests screen', () => {
     expect(await screen.findByText('Bosch power drill')).toBeTruthy();
   });
 
-  test('no chat is offered on any request', async () => {
+  // Chat (Phase 2C) opens only after acceptance.
+  test('no chat is offered on pending, declined or cancelled requests', async () => {
+    const api = fakeApi();
+    api.listOutgoingRequests.mockResolvedValue(
+      page([
+        borrowRequest(),
+        borrowRequest({ id: 'r-declined', status: 'declined', decidedAt: '2026-11-10T09:00:00Z' }),
+        borrowRequest({ id: 'r-cancelled', status: 'cancelled', cancelledAt: '2026-11-10T09:00:00Z' }),
+      ]),
+    );
+    await renderApp(<BorrowRequestsScreen />, api);
+    await screen.findByText('Declined');
+    expect(screen.queryByText(/chat/i)).toBeNull();
+    expect(api.openConversation).not.toHaveBeenCalled();
+  });
+
+  test('an accepted request offers chat', async () => {
     const api = fakeApi();
     api.listOutgoingRequests.mockResolvedValue(page([borrowRequest({ status: 'accepted', decidedAt: '2026-11-10T09:00:00Z' })]));
     await renderApp(<BorrowRequestsScreen />, api);
     await screen.findByText('Accepted');
-    expect(screen.queryByText(/chat/i)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Open chat about Bosch power drill' })).toBeTruthy();
   });
 });

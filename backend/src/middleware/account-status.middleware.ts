@@ -23,12 +23,16 @@ const REFUSALS: Record<AccountStatus, AppError> = {
 export function requireAccountStatus(profiles: ProfileRepository, allowed: AccountStatus[] = ['active']): RequestHandler {
   return async (req, _res, next) => {
     const { user, accessToken } = getAuth(req);
-    const profile = await profiles.getProfile(accessToken, user.id);
-    if (!profile) throw new AppError(500, 'PROFILE_MISSING', 'Account profile is unavailable');
-    if (!allowed.includes(profile.accountStatus)) throw REFUSALS[profile.accountStatus];
-    req.account = profile;
+    req.account = assertAccountStatus(await profiles.getProfile(accessToken, user.id), allowed);
     next();
   };
+}
+
+// The same rule for callers outside Express (the chat socket).
+export function assertAccountStatus(profile: Profile | null, allowed: AccountStatus[] = ['active']): Profile {
+  if (!profile) throw new AppError(500, 'PROFILE_MISSING', 'Account profile is unavailable');
+  if (!allowed.includes(profile.accountStatus)) throw REFUSALS[profile.accountStatus];
+  return profile;
 }
 
 export function getAccount(req: Request): Profile {

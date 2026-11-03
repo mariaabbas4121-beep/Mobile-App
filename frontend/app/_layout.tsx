@@ -9,6 +9,7 @@ import { AppProvider } from '../context/AppContext';
 import { AuthProvider, useAuth } from '../context/AuthContext';
 import { ListingsProvider } from '../context/ListingsContext';
 import { BorrowRequestsProvider } from '../context/BorrowRequestsContext';
+import { ChatProvider } from '../context/ChatContext';
 
 // Keep the native splash screen up until the saved session has been checked,
 // so neither the sign-in screens nor the app flash before the right one.
@@ -56,6 +57,7 @@ function RootNavigator() {
         <Stack.Screen name="lend/new" options={{ presentation: 'modal' }} />
         <Stack.Screen name="verify/phone" options={{ presentation: 'card' }} />
         <Stack.Screen name="requests/index" options={{ presentation: 'card' }} />
+        <Stack.Screen name="chat/[id]" options={{ presentation: 'card' }} />
       </Stack.Protected>
     </Stack>
   );
@@ -68,11 +70,13 @@ export default function RootLayout() {
         <AuthProvider>
           <ListingsProvider>
             <BorrowRequestsProvider>
-              <AppProvider>
-                <StatusBar style="light" />
-                <RootNavigator />
-                <Toast />
-              </AppProvider>
+              <ChatProvider>
+                <AppProvider>
+                  <StatusBar style="light" />
+                  <RootNavigator />
+                  <Toast />
+                </AppProvider>
+              </ChatProvider>
             </BorrowRequestsProvider>
           </ListingsProvider>
         </AuthProvider>

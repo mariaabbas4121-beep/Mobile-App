@@ -9,6 +9,7 @@ This is the contract the mobile app integrates against. Everything here is imple
 - [Phone verification](#phone-verification): [status](#get-apiv1verificationphone), [start](#post-apiv1verificationphonestart), [resend](#post-apiv1verificationphoneresend), [confirm](#post-apiv1verificationphoneconfirm)
 - [Listings](#listings): [list](#get-apiv1items), [get](#get-apiv1itemsid), [create](#post-apiv1items), [update](#patch-apiv1itemsid), [archive](#delete-apiv1itemsid), [add photo](#post-apiv1itemsidimages), [remove photo](#delete-apiv1itemsidimagesimageid)
 - [Borrow requests](#borrow-requests): [create](#post-apiv1borrow-requests), [lists](#get-apiv1borrow-requestsoutgoing-and-incoming), [get](#get-apiv1borrow-requestsid), [accept · decline · cancel](#post-apiv1borrow-requestsidaccept--decline--cancel), [booked dates](#get-apiv1itemsidbooked-dates)
+- [Chat](#chat): [list](#get-apiv1conversations), [open](#post-apiv1conversations), [get](#get-apiv1conversationsid), [history](#get-apiv1conversationsidmessages), [send](#post-apiv1conversationsidmessages), [mark read](#post-apiv1conversationsidread), [Socket.IO events](#socketio), [two-device test](#testing-chat-with-two-accounts), [limitations](#known-limitations)
 - [Email confirmation flow](#email-confirmation-flow)
 - [Error codes](#error-codes)
 - [Rate limits](#rate-limits)
@@ -571,6 +572,145 @@ Token required; body `{}`. `200 { "data": { "request": { … } } }` with the new
 
 Public, token optional. Accepted ranges from today on, for the request form: `200 { "data": { "bookedDates": [ { "startDate": "2026-11-12", "endDate": "2026-11-14" } ] } }`. Dates only, never who booked them. `404 LISTING_NOT_FOUND` for listings the caller cannot see.
 
+## Chat
+
+Private, real-time messaging between the borrower and the lender of an **accepted** borrow request. There is exactly one conversation per accepted request. Nobody else can see it, and there is no way to message an arbitrary user.
+
+- **When it opens.** Accepting a request creates its conversation in the same database transaction. Pending, declined and cancelled requests have no conversation: opening one gives `409 CHAT_NOT_AVAILABLE`.
+- **Who is in it.** The database copies the borrower and lender from the request. Clients never send participant or sender ids; bodies that try to are rejected with `400 VALIDATION_ERROR`.
+- **Outsiders.** Anyone who is not a participant gets `404` (`CONVERSATION_NOT_FOUND` or `BORROW_REQUEST_NOT_FOUND`), so ids reveal nothing.
+- **Archived listings.** Archiving the listing keeps the conversation open and messaging enabled: the accepted reservation still stands and the two people still need to arrange the handover. `listing.archived` is `true` so the app can say so.
+- **Sending.** Requires an account that is `active` or `restricted`; `suspended` and `deletion_pending` get `403 ACCOUNT_*`. The status is read on every send. Reading is allowed to any participant.
+- **Messages.** Text only, 1 to 2000 characters (counted as characters, not bytes), not blank. Surrounding whitespace is trimmed, `\r\n` becomes `\n`, and control characters other than tab and newline are removed. Messages cannot be edited or deleted.
+- **Retries.** Every message carries a `clientId` (a UUID the device generates). The same sender sending the same `clientId` in the same conversation stores the message once and gets the stored copy back with `duplicate: true`; it is not broadcast again. Reusing a `clientId` for different text is `409 CLIENT_ID_REUSED`.
+- **Order of operations.** A message is stored in PostgreSQL before it is broadcast. A failed broadcast never loses a message; it is still returned by the history endpoint.
+- **Unread counts.** Kept per participant (`unreadCount`); opening a chat marks it read. Your own messages never count. The other person is **not** shown whether you have read their messages (no read receipts).
+
+**Conversation object**
+
+```json
+{
+  "id": "5f0e2c1a-…",
+  "borrowRequestId": "8c0f6d5e-…",
+  "viewerRole": "lender",
+  "request": { "id": "8c0f6d5e-…", "status": "accepted", "startDate": "2026-11-12", "endDate": "2026-11-14" },
+  "listing": { "id": "5d0c6f8e-…", "title": "Camping tent", "archived": false, "imageUrl": "https://…signed…" },
+  "otherParticipant": { "id": "0b8e7f7e-…", "displayName": "Sara" },
+  "lastMessage": { "id": "9a1b…", "senderId": "0b8e7f7e-…", "body": "Is 5pm ok?", "createdAt": "2026-11-12T11:02:03.123456+00:00" },
+  "unreadCount": 1,
+  "lastMessageAt": "2026-11-12T11:02:03.123456+00:00",
+  "createdAt": "2026-11-11T09:00:00.000000+00:00"
+}
+```
+
+`lastMessage.body` holds at most the first 200 characters. `otherParticipant` is an id and display name only: no email, phone or address.
+
+**Message object**
+
+```json
+{
+  "id": "9a1b…",
+  "conversationId": "5f0e2c1a-…",
+  "senderId": "0b8e7f7e-…",
+  "body": "Is 5pm ok?",
+  "clientId": "3d6f…",
+  "createdAt": "2026-11-12T11:02:03.123456+00:00"
+}
+```
+
+`id` and `createdAt` are set by the database and never change. `createdAt` keeps microsecond precision; clients should treat it as an opaque timestamp.
+
+### `GET /api/v1/conversations`
+
+Token required. The caller's conversations, most recent activity first. Query: `page`, `pageSize` (at most 50).
+
+`200 { "data": { "items": [ … ], "pagination": { "page": 1, "pageSize": 20, "total": 2, "totalPages": 1 } } }`
+
+### `POST /api/v1/conversations`
+
+Token required. Get-or-create the conversation of an accepted request. Repeating it, from either participant, returns the same conversation.
+
+```json
+{ "borrowRequestId": "8c0f6d5e-…" }
+```
+
+`200 { "data": { "conversation": { … } } }`. Errors: `400 VALIDATION_ERROR`, `401`, `404 BORROW_REQUEST_NOT_FOUND` (no such request, or you are not part of it), `409 CHAT_NOT_AVAILABLE` (pending, declined or cancelled).
+
+### `GET /api/v1/conversations/:id`
+
+Token required; participants only. `200 { "data": { "conversation": { … } } }`, otherwise `404 CONVERSATION_NOT_FOUND`.
+
+### `GET /api/v1/conversations/:id/messages`
+
+Token required; participants only. One page of history, **newest first**. Query: `limit` (1–100, default 30) and `before` (the `nextCursor` of the previous page, for older messages).
+
+`200 { "data": { "items": [ … ], "nextCursor": "WyIyMDI2LTEx…" } }`. `nextCursor` is `null` on the last page. Cursors are opaque; a malformed one is `400 VALIDATION_ERROR`.
+
+### `POST /api/v1/conversations/:id/messages`
+
+Token required; participants only; account `active` or `restricted`. The fallback for when the socket is not connected; it applies the same rules and is broadcast to connected sockets like a socket send.
+
+```json
+{ "clientId": "3d6f2a8e-1b4c-4f7a-9e2d-5c6b7a8f9e0d", "body": "Is 5pm ok?" }
+```
+
+`201 { "data": { "message": { … }, "duplicate": false } }` for a new message; `200` with `"duplicate": true` for a retry. Errors: `400 VALIDATION_ERROR` (empty, blank, too long, bad `clientId`, unknown fields), `403 ACCOUNT_*`, `404 CONVERSATION_NOT_FOUND`, `409 CHAT_NOT_AVAILABLE`, `409 CLIENT_ID_REUSED`, `429 RATE_LIMITED`.
+
+### `POST /api/v1/conversations/:id/read`
+
+Token required; participants only. Marks everything in the conversation read for the caller. `200 { "data": { "conversation": { …, "unreadCount": 0 } } }`.
+
+### Socket.IO
+
+Real-time delivery runs on the API's own HTTP server: same host and port, path `/socket.io`, Socket.IO v4. The mobile app uses the WebSocket transport only. REST stays the source of truth: after reconnecting, clients fetch the newest page of history to fill anything missed.
+
+**Authentication.** Pass the Supabase access token in the handshake:
+
+```js
+import { io } from 'socket.io-client';
+const socket = io(API_URL, { transports: ['websocket'], auth: (cb) => getAccessToken().then((token) => cb({ token })) });
+```
+
+The server checks the token with Supabase Auth, exactly like the `Authorization` header on REST. A missing or malformed token is refused with `connect_error` whose `err.data` is `{ "code": "UNAUTHENTICATED" }`; a rejected token gives `{ "code": "INVALID_TOKEN" }` (refresh the session, then `socket.connect()`). The user id comes only from the token; nothing the client sends later can change it. When the token expires, the server emits `session:expired` and disconnects; reconnect with a fresh token.
+
+**Acknowledgements.** Every client event takes an acknowledgement callback, which receives either `{ "ok": true, … }` or `{ "ok": false, "error": { "code", "message", "details"?, "retryAfterSeconds"? } }`. Error codes are the same as REST.
+
+| Event (client → server) | Payload | Acknowledgement | Notes |
+| --- | --- | --- | --- |
+| `conversation:join` | `{ conversationId }` | `{ ok: true, conversation }` | The server checks that you are a participant before adding the socket to the conversation's private room. Otherwise `CONVERSATION_NOT_FOUND`. At most 50 rooms per socket. |
+| `conversation:leave` | `{ conversationId }` | `{ ok: true }` | |
+| `message:send` | `{ conversationId, clientId, body }` | `{ ok: true, message, duplicate }` | Authorized again on every send (participant, request accepted, account status). Stored, then broadcast. |
+
+| Event (server → client) | Payload | Sent to |
+| --- | --- | --- |
+| `message:new` | `{ conversationId, message }` | Sockets in that conversation's room, the sender's included (match on `message.clientId`). |
+| `conversation:updated` | `{ conversationId }` | Both participants' own sockets. Contains no message content; it only tells the app to reload its conversation list. |
+| `message:error` | `{ conversationId, clientId, error }` | The sending socket, only when `message:send` was emitted **without** an acknowledgement callback. |
+| `session:expired` | none | The socket whose token expired, just before it is disconnected. |
+
+Typing indicators are not implemented. Limits: 30 messages per minute per user (REST and socket combined) and 120 events per minute per socket.
+
+**Scaling note.** Rooms and the send limit live in the API process. Running more than one API instance needs a shared Socket.IO adapter (for example Redis) and a shared rate-limit store.
+
+### Testing chat with two accounts
+
+1. Apply both migrations, `20261102120000_borrow_requests.sql` and then `20261103120000_chat.sql` (see [SUPABASE.md](SUPABASE.md#chat-phase-2c)).
+2. Start the API (`npm.cmd run dev`) and Expo (`npx expo start -c`) with `EXPO_PUBLIC_API_URL` set to the computer's current LAN address.
+3. Sign in as account A on one phone (or emulator) and account B on another.
+4. A lists an item. B opens it and sends a borrow request.
+5. A opens Activity → Requests for my items → Accept. The app should go straight to the conversation.
+6. B opens the Chat tab (pull to refresh) or Activity → My requests → Open chat.
+7. Send messages both ways. Each should appear on the other phone without refreshing.
+8. Turn one phone's Wi-Fi off. The chat shows "Reconnecting…". A message sent then shows "Not sent · Tap to retry"; it sends after Wi-Fi returns and appears once on the other phone.
+9. Sign in as a third account C. C must not see the conversation in the Chat tab.
+
+### Known limitations
+
+- No push notifications: someone whose app is closed sees new messages and newly opened chats only when they next open the Chat tab. While the app is open, the Chat tab and its badge update live.
+- No read receipts and no typing indicators. Unread counts are private to each participant.
+- Text only: no images or attachments.
+- Messages cannot be edited, deleted or reported yet.
+
 ## Email confirmation flow
 
 1. The app calls `POST /auth/signup` and shows the `202` message.
@@ -614,6 +754,10 @@ The API has no endpoint for step 2: Supabase handles the link itself. How the mo
 | 409 | `DATES_UNAVAILABLE` | Borrow request or accept overlapping an accepted request |
 | 409 | `DUPLICATE_PENDING_REQUEST` | You already have a pending request for this listing |
 | 409 | `INVALID_STATUS_TRANSITION` | Accept/decline/cancel on a request that is no longer pending |
+| 404 | `CONVERSATION_NOT_FOUND` | Chat: no such conversation, or you are not a participant |
+| 409 | `CHAT_NOT_AVAILABLE` | Chat for a request that is not accepted |
+| 409 | `CLIENT_ID_REUSED` | Chat: the same `clientId` sent again with different text |
+| 400 | `INVALID_MESSAGE` | Chat: the database refused the message (normally caught first as `VALIDATION_ERROR`) |
 | 400 | `INVALID_DATES` | Database refused the dates (normally caught first as `VALIDATION_ERROR`) |
 | 409 | `LISTING_ARCHIVED` | Listings: change or photo upload on an archived listing |
 | 409 | `IMAGE_LIMIT_REACHED` | Listing photo upload: already 5 photos |
@@ -658,6 +802,8 @@ Limits are per API process. Several instances behind a load balancer need a shar
 | `POST /items` | 20 / hour | Account |
 | `POST /items/:id/images` | 60 / hour | Account |
 | `POST /borrow-requests` | 20 / hour | Account |
+| Chat messages (REST and socket together) | 30 / minute | Account |
+| Socket.IO events | 120 / minute | Socket |
 | Phone start + resend | 1 SMS per `PHONE_OTP_RESEND_COOLDOWN_SECONDS` (default 60 s) | Account; **stored in the database**, so it holds across API instances and makes double taps safe |
 
 IPv6 clients are grouped by /56. Behind a reverse proxy, set `TRUST_PROXY_HOPS` so the real client IP is used. Supabase applies its own limits as well (notably on sending email and SMS, and on OTP verifications per IP); those also surface as `429 RATE_LIMITED`. Phone limits are keyed by a hash of the user id or number, never the raw value, and never include the code.

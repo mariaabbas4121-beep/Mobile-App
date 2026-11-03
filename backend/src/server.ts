@@ -10,6 +10,10 @@ import { createSupabasePhoneVerificationStore } from './verification/supabase-ph
 import { createPhoneVerificationService } from './verification/phone-verification.service.js';
 import { createSupabaseListingRepository } from './listings/supabase-listing.repository.js';
 import { createSupabaseBorrowRequestRepository } from './borrow/supabase-borrow.repository.js';
+import { createSupabaseChatRepository } from './chat/supabase-chat.repository.js';
+import { createChatEvents, createChatService } from './chat/chat.service.js';
+import { DEFAULT_RATE_LIMITS } from './middleware/rate-limit.middleware.js';
+import { attachChatSocket } from './realtime/chat.socket.js';
 
 // Load .env only in the entry point, so tests decide their own environment.
 // Existing process variables take precedence over the file.
@@ -29,11 +33,22 @@ try {
 
 const logger = createLogger(config);
 const supabase = createSupabaseClients(config);
+const authGateway = createSupabaseAuthGateway(supabase, config, logger);
+const profiles = createSupabaseProfileRepository(supabase, logger);
+// One chat service for REST and Socket.IO, so both share rules and limits,
+// and a message sent over either is broadcast to connected sockets.
+const chatEvents = createChatEvents(logger);
+const chat = createChatService({
+  repository: createSupabaseChatRepository(supabase, logger),
+  profiles,
+  events: chatEvents,
+  sendLimit: DEFAULT_RATE_LIMITS.chatMessagePerUser,
+});
 const app = createApp({
   config,
   logger,
-  authGateway: createSupabaseAuthGateway(supabase, config, logger),
-  profiles: createSupabaseProfileRepository(supabase, logger),
+  authGateway,
+  profiles,
   // Needs SUPABASE_SECRET_KEY to record results; without it the endpoints
   // answer 503 SERVER_NOT_CONFIGURED.
   phoneVerification: createPhoneVerificationService({
@@ -45,15 +60,19 @@ const app = createApp({
   // Runs every query with the caller's token (or anonymously); no secret key.
   listings: createSupabaseListingRepository(supabase, logger),
   borrowRequests: createSupabaseBorrowRequestRepository(supabase, logger),
+  chat,
 });
 
 const server = app.listen(config.port, () => {
   logger.info({ port: config.port, env: config.nodeEnv }, 'NeighborShare API listening');
 });
+// Same port as the API, path /socket.io.
+const realtime = attachChatSocket(server, { config, logger, gateway: authGateway, chat, events: chatEvents });
 
 function shutdown(signal: string) {
   logger.info({ signal }, 'shutting down');
-  server.close(() => process.exit(0));
+  // Disconnects sockets, then closes the HTTP server.
+  void realtime.close().then(() => process.exit(0));
   // Don't hang forever on keep-alive connections.
   setTimeout(() => process.exit(1), 10_000).unref();
 }

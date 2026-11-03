@@ -22,6 +22,9 @@ import { createPhoneVerificationService } from '../src/verification/phone-verifi
 import type { Caller, Listing, ListingImage, ListingRepository } from '../src/listings/listing.types.js';
 import type { BorrowRequest, BorrowRequestRepository, BorrowStatus } from '../src/borrow/borrow.types.js';
 import { inclusiveDays, rangesOverlap } from '../src/borrow/dates.js';
+import type { ChatMessage, ChatRepository, Conversation } from '../src/chat/chat.types.js';
+import { createChatEvents, createChatService } from '../src/chat/chat.service.js';
+import { DEFAULT_RATE_LIMITS } from '../src/middleware/rate-limit.middleware.js';
 
 // Fake, syntactically valid configuration for unit tests. It points at an
 // unroutable host and contains no real key.
@@ -445,6 +448,123 @@ export function memoryBorrowRequests(listings: ReturnType<typeof memoryListings>
   return repo;
 }
 
+// --- Chat fakes ------------------------------------------------------------
+// In-memory stand-in with the migration's rules: a conversation exists for
+// each accepted request (as the accept trigger creates it), participants
+// only, sends only while the request is accepted, one message per client id.
+export function memoryChat(listings: ReturnType<typeof memoryListings>, borrowRequests: ReturnType<typeof memoryBorrowRequests>) {
+  interface Row {
+    id: string;
+    borrowRequestId: string;
+    borrowerId: string;
+    lenderId: string;
+    readAt: Record<string, string | null>;
+    lastMessageAt: string | null;
+    createdAt: string;
+  }
+  const conversations = new Map<string, Row>();
+  const messages: ChatMessage[] = [];
+  let seq = 0;
+  let clock = Date.parse('2026-11-10T00:00:00Z');
+  const stamp = () => new Date((clock += 1000)).toISOString();
+  const uuid = (prefix: string) => `00000000-0000-4000-${prefix}-${String(++seq).padStart(12, '0')}`;
+
+  // What the accept trigger does.
+  const sync = () => {
+    for (const r of borrowRequests.rows.values()) {
+      if (r.status !== 'accepted' || [...conversations.values()].some((c) => c.borrowRequestId === r.id)) continue;
+      const c: Row = {
+        id: uuid('b000'),
+        borrowRequestId: r.id,
+        borrowerId: r.borrowerId,
+        lenderId: r.lenderId,
+        readAt: { [r.borrowerId]: null, [r.lenderId]: null },
+        lastMessageAt: null,
+        createdAt: stamp(),
+      };
+      conversations.set(c.id, c);
+    }
+  };
+  const party = (caller: Caller, c: Row) => c.borrowerId === caller.userId || c.lenderId === caller.userId;
+  const inConversation = (id: string) => messages.filter((m) => m.conversationId === id);
+  const view = (c: Row, viewerId: string): Conversation => {
+    const r = borrowRequests.rows.get(c.borrowRequestId)!;
+    const l = listings.rows.get(r.listingId)!;
+    const own = inConversation(c.id);
+    const last = own[own.length - 1];
+    const readAt = c.readAt[viewerId] ?? null;
+    return {
+      id: c.id,
+      borrowRequestId: c.borrowRequestId,
+      viewerRole: c.borrowerId === viewerId ? 'borrower' : 'lender',
+      request: { id: r.id, status: r.status, startDate: r.startDate, endDate: r.endDate },
+      listing: { id: l.id, title: l.title, archived: Boolean(l.archivedAt), imageUrl: l.images[0]?.url ?? null },
+      otherParticipant: c.borrowerId === viewerId ? { id: c.lenderId, displayName: 'Lender' } : { id: c.borrowerId, displayName: 'Borrower' },
+      lastMessage: last ? { id: last.id, senderId: last.senderId, body: last.body.slice(0, 200), createdAt: last.createdAt } : null,
+      unreadCount: own.filter((m) => m.senderId !== viewerId && (!readAt || m.createdAt > readAt)).length,
+      lastMessageAt: c.lastMessageAt,
+      createdAt: c.createdAt,
+    };
+  };
+  const notFound = () => AppError.notFound('Conversation not found', 'CONVERSATION_NOT_FOUND');
+
+  const repo = {
+    conversations,
+    stored: messages,
+    list: vi.fn<ChatRepository['list']>(async (caller, { page, pageSize }) => {
+      sync();
+      const mine = [...conversations.values()]
+        .filter((c) => party(caller, c))
+        .sort((a, b) => (b.lastMessageAt ?? b.createdAt).localeCompare(a.lastMessageAt ?? a.createdAt));
+      return { items: mine.slice((page - 1) * pageSize, page * pageSize).map((c) => view(c, caller.userId)), total: mine.length };
+    }),
+    get: vi.fn<ChatRepository['get']>(async (caller, id) => {
+      sync();
+      const c = conversations.get(id);
+      return c && party(caller, c) ? view(c, caller.userId) : null;
+    }),
+    open: vi.fn<ChatRepository['open']>(async (caller, borrowRequestId) => {
+      const r = borrowRequests.rows.get(borrowRequestId);
+      if (!r || (r.borrowerId !== caller.userId && r.lenderId !== caller.userId)) return null;
+      if (r.status !== 'accepted') throw AppError.conflict('CHAT_NOT_AVAILABLE', 'x');
+      sync();
+      return [...conversations.values()].find((c) => c.borrowRequestId === r.id)!.id;
+    }),
+    messages: vi.fn<ChatRepository['messages']>(async (caller, id, { before, limit }) => {
+      const c = conversations.get(id);
+      if (!c || !party(caller, c)) return [];
+      return inConversation(id)
+        .reverse()
+        .filter((m) => !before || m.createdAt < before.createdAt || (m.createdAt === before.createdAt && m.id < before.id))
+        .slice(0, limit);
+    }),
+    send: vi.fn<ChatRepository['send']>(async (caller, id, { clientId, body }) => {
+      sync();
+      const c = conversations.get(id);
+      if (!c || !party(caller, c)) throw notFound();
+      if (borrowRequests.rows.get(c.borrowRequestId)!.status !== 'accepted') throw AppError.conflict('CHAT_NOT_AVAILABLE', 'x');
+      const participantIds = [c.borrowerId, c.lenderId];
+      const existing = messages.find((m) => m.conversationId === id && m.senderId === caller.userId && m.clientId === clientId);
+      if (existing) {
+        if (existing.body !== body) throw AppError.conflict('CLIENT_ID_REUSED', 'x');
+        return { message: { ...existing }, created: false, participantIds };
+      }
+      const message: ChatMessage = { id: uuid('b100'), conversationId: id, senderId: caller.userId, body, clientId, createdAt: stamp() };
+      messages.push(message);
+      c.lastMessageAt = message.createdAt;
+      c.readAt[caller.userId] = message.createdAt;
+      return { message: { ...message }, created: true, participantIds };
+    }),
+    markRead: vi.fn<ChatRepository['markRead']>(async (caller, id) => {
+      const c = conversations.get(id);
+      if (!c || !party(caller, c)) return false;
+      c.readAt[caller.userId] = stamp();
+      return true;
+    }),
+  };
+  return repo;
+}
+
 export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPolicy; now?: () => number } = {}) {
   const config = overrides.config ?? testConfig();
   const gateway = fakeGateway();
@@ -453,6 +573,15 @@ export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPoli
   const phoneStore = memoryPhoneStore(overrides.now);
   const listings = memoryListings();
   const borrowRequests = memoryBorrowRequests(listings);
+  const chatRepository = memoryChat(listings, borrowRequests);
+  const chatEvents = createChatEvents(silentLogger);
+  const chat = createChatService({
+    repository: chatRepository,
+    profiles,
+    events: chatEvents,
+    sendLimit: (overrides.rateLimits ?? DEFAULT_RATE_LIMITS).chatMessagePerUser,
+    ...(overrides.now ? { now: overrides.now } : {}),
+  });
   const app = createApp({
     config,
     logger: silentLogger,
@@ -467,8 +596,9 @@ export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPoli
     }),
     listings,
     borrowRequests,
+    chat,
     ...(overrides.now ? { now: overrides.now } : {}),
     ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
   });
-  return { app, gateway, profiles, phoneAuth, phoneStore, listings, borrowRequests };
+  return { app, gateway, profiles, phoneAuth, phoneStore, listings, borrowRequests, chat, chatRepository, chatEvents };
 }

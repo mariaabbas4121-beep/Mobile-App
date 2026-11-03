@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { io as connectClient } from 'socket.io-client';
 import { afterEach, describe, expect, test } from 'vitest';
 import { validEnv } from '../helpers.js';
 
@@ -65,6 +66,13 @@ describe('server process', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true, data: { status: 'ok' } });
     expect(proc.output()).not.toContain(validEnv.SUPABASE_PUBLISHABLE_KEY);
+
+    // The chat socket server shares the port and refuses connections
+    // without a token (no Supabase call is made for those).
+    const socket = connectClient(`http://127.0.0.1:${port}`, { transports: ['websocket'], reconnection: false });
+    const refusal = await new Promise<Error & { data?: { code?: string } }>((resolve) => socket.once('connect_error', resolve));
+    socket.disconnect();
+    expect(refusal.data).toEqual({ code: 'UNAUTHENTICATED' });
   }, 30_000);
 
   test('refuses to start with invalid configuration, naming variables but not values', async () => {

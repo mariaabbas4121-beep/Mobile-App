@@ -35,6 +35,8 @@ They need no `.env`, network or Supabase project.
 | `phone-verification.test.ts` | Phone routes and service against an in-memory model of Supabase's phone-change flow: number parsing, auth and account status, start/resend/confirm success, provider disabled or misconfigured, SMS failure, numbers owned by other accounts, wrong/expired/repeated codes, other users' numbers, independent post-verification check, recovery after a lost database write, number changes, reconciliation, cooldown and double taps, per-IP/account/number limits, logs without codes |
 | `listings.routes.test.ts` | Listing endpoints with an in-memory repository: create/read/update/archive contract, rejecting client-supplied owners and unknown fields, validation of every field and query parameter, pagination, search and filters, owner-only edits and archives (403), unknown and malformed ids (404/400), account-status rules, archived listings, photo type/content/size checks (415/413), the 5-photo limit, photo ownership, rate limit |
 | `borrow-requests.routes.test.ts` | Borrow-request endpoints with in-memory repositories: create (dates in Pakistan time, inclusive, same-day, 30-day and 90-day limits, bad formats), auth and account status, own/archived/unavailable listings, client-supplied ids rejected, overlap with accepted requests, duplicate pending, accept/decline/cancel by the right side only, outsiders get 404, every invalid transition, losing an accept race gives 409, lists and filters, booked dates, rate limit |
+| `chat.routes.test.ts` | Chat REST endpoints with in-memory repositories: get-or-create is idempotent for both sides, pending/declined/cancelled refused, outsiders get 404 everywhere, participant ids rejected, list with last message and unread count, mark read, cursor pagination and bad cursors, send validation and sanitising, retry with the same clientId stored and published once, clientId reuse, account status, archived listing, rate limit |
+| `chat.socket.test.ts` | The Socket.IO server on a real localhost HTTP server with real `socket.io-client` connections: no token, bad token, valid token, disconnect on token expiry; join only for participants (room membership checked); messages stored before broadcast and delivered only to room members; content-free hints to participants outside the room; retries delivered once; validation and client-supplied sender ids; outsiders, non-accepted requests and suspended accounts refused; `message:error` without an ack; REST sends reach sockets; leaving a room |
 | `supabase-phone-auth.test.ts` | The Supabase adapter with fake HTTP and SDK: request shape (caller's token), error mapping, settings caching, revoking the session `verifyOtp` issues |
 
 ## Database tests (`tests/db`)
@@ -48,6 +50,8 @@ They cover signup provisioning, retries and bad metadata, email confirmation, ve
 `listings.test.ts` covers the listings migration: only active users create, only for themselves; others' updates match nothing; ownership cannot move; archiving is server-stamped and final; no deletes; suspended owners vanish from discovery; anonymous reads expose only listing columns; `search_listings` word search (wildcards literal), filters, paging with a stable total, sorting and the page-size cap; photo rows tied to the owner's own listing and folder, not on archived listings, at most 5; and the Storage bucket's privacy, limits and upload/read/delete policies (on a minimal `storage` schema stand-in).
 
 `borrow-requests.test.ts` covers the borrow-request migration: lender filled from the listing and not choosable, borrower identity enforced, anonymous access refused, own/archived/unavailable/suspended-owner listings refused, the date window and limits, one pending per borrower, every allowed and forbidden transition and actor, immutable request details, account-status rules, auto-decline on archive, no deletes, and the exclusion constraint (touching inclusive ranges conflict, the next day does not, the service role and a single multi-row update cannot bypass it, declined/cancelled reserve nothing), plus both read helpers. PGlite has one connection, so two transactions cannot truly race here; the guarantee under real concurrency is PostgreSQL's exclusion constraint, which these tests show is in place and enforced.
+
+`chat.test.ts` covers the chat migration: accepting creates the conversation with the request's participants; no conversation for pending, declined or cancelled requests; `open_conversation` idempotent and on demand; outsiders get null; no direct writes to conversations and no access to internal helpers; only participants read conversations and messages; anonymous gets nothing; the conversation list (other participant, last message, unread count, ordering); mark read; cursor pagination with no gaps or repeats; send validation (empty, blank, over 2000); idempotent client ids and refusing a reused id; no impersonation, no chosen ids or timestamps, no edits or deletes; suspended refused and restricted allowed; refused once the request is no longer accepted; archived listings keep chat open.
 
 Passing here means the migration logic is right. It does not prove the hosted project is identical; the integration suite checks that.
 
@@ -163,6 +167,17 @@ Timings over the LAN address with a throwaway user (warm, cold in brackets): hea
 | Frontend tests (`npx jest`) | 239 / 239 passed (22 new: date rules, request form, item screen, requests screen) |
 | Hosted Supabase | **Migration not applied**; nothing about borrow requests was run against the hosted project |
 | Concurrent accepts on a real server | **Not run** (PGlite has one connection; the exclusion constraint is the guarantee) |
+
+### Chat, Phase 2C (2026-11-02)
+
+| Check | Result |
+| --- | --- |
+| Backend type check, build | Clean |
+| `npm test` (unit + database) | 501 / 501 passed (445 earlier + 23 chat database + 18 chat route + 15 socket tests); the server-process test now also checks that the real entry point refuses an unauthenticated socket |
+| Frontend type check | Clean |
+| Frontend tests (`npx jest`) | 264 / 264 passed (24 chat tests: conversation list, conversation screen, send/retry/fallback, reconnect, older messages, Open chat, lender redirect after accept, connection handling; plus one updated borrow-request test) |
+| Hosted Supabase | **Not tested.** Neither the borrow-request nor the chat migration is applied to the dev project |
+| Real devices | **Not tested.** Two-device steps are in API.md |
 
 ## Manual test: phone verification with a Supabase test number
 

@@ -98,6 +98,14 @@ export function errorMessage(err: unknown): string {
       return 'Those dates cannot be requested. Choose dates from today onwards.';
     case 'BORROW_REQUEST_NOT_FOUND':
       return 'This request no longer exists.';
+    case 'CONVERSATION_NOT_FOUND':
+      return 'This conversation is not available.';
+    case 'CHAT_NOT_AVAILABLE':
+      return 'Chat opens once the owner accepts the borrow request.';
+    case 'INVALID_MESSAGE':
+      return 'Messages must be between 1 and 2000 characters.';
+    case 'CLIENT_ID_REUSED':
+      return 'This message could not be sent. Please type it again.';
     case 'STORAGE_NOT_CONFIGURED':
     case 'STORAGE_UNAVAILABLE':
       return 'Photo uploads are not available right now. Please try again later.';

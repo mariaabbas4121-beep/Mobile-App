@@ -7,6 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Toast from 'react-native-toast-message';
 import { useBorrowRequests, type BorrowAction } from '../../context/BorrowRequestsContext';
+import { useChat } from '../../context/ChatContext';
 import { isApiError } from '../../lib/api/client';
 import type { BorrowRequest, BorrowRole, BorrowStatus } from '../../lib/api/types';
 import { errorMessage } from '../../lib/auth/messages';
@@ -14,6 +15,8 @@ import { formatRange } from '../../lib/borrow/dates';
 import { Colors, Radii, Shadows, Spacing, Typography } from '../../utils/theme';
 
 type Tab = 'borrowing' | 'lending';
+// What a card is busy with: a decision, or opening its chat.
+type CardBusy = BorrowAction | 'chat';
 
 const STATUS: Record<BorrowStatus, { label: string; color: string; bg: string; icon: string }> = {
   pending: { label: 'Waiting for answer', color: '#b45309', bg: '#fef3c7', icon: 'time-outline' },
@@ -33,12 +36,14 @@ function RequestCard({
   error,
   onAction,
   onOpenListing,
+  onOpenChat,
 }: {
   request: BorrowRequest;
-  busy: BorrowAction | null;
+  busy: CardBusy | null;
   error: string | null;
   onAction: (action: BorrowAction) => void;
   onOpenListing: () => void;
+  onOpenChat: () => void;
 }) {
   const cfg = STATUS[request.status];
   const lending = request.viewerRole === 'lender';
@@ -85,6 +90,24 @@ function RequestCard({
 
       {request.status === 'accepted' ? (
         <Text style={styles.reserved}>These dates are reserved for {lending ? other : 'you'}.</Text>
+      ) : null}
+      {request.status === 'accepted' ? (
+        <View style={styles.actions}>
+          <TouchableOpacity
+            style={[styles.actionBtn, styles.chatBtn]}
+            onPress={onOpenChat}
+            disabled={busy !== null}
+            accessibilityRole="button"
+            accessibilityLabel={`Open chat about ${request.listing.title}`}
+          >
+            {busy === 'chat' ? (
+              <ActivityIndicator size="small" color={Colors.white} />
+            ) : (
+              <Ionicons name="chatbubbles-outline" size={16} color={Colors.white} />
+            )}
+            <Text style={[styles.actionText, { color: Colors.white }]}>Open chat with {other}</Text>
+          </TouchableOpacity>
+        </View>
       ) : null}
 
       {error ? <Text style={styles.cardError} accessibilityRole="alert">{error}</Text> : null}
@@ -138,12 +161,13 @@ export default function BorrowRequestsScreen() {
   const [tab, setTab] = useState<Tab>(params.tab === 'lending' ? 'lending' : 'borrowing');
   // Stable functions only: the context value itself changes on every revision.
   const { listOutgoing, listIncoming, act, revision } = useBorrowRequests();
+  const { openForRequest } = useChat();
 
   const [items, setItems] = useState<BorrowRequest[]>([]);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [loadError, setLoadError] = useState<unknown>(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [busy, setBusy] = useState<{ id: string; action: BorrowAction } | null>(null);
+  const [busy, setBusy] = useState<{ id: string; action: CardBusy } | null>(null);
   const [cardErrors, setCardErrors] = useState<Record<string, string>>({});
   const latest = useRef(0);
 
@@ -201,8 +225,10 @@ export default function BorrowRequestsScreen() {
     if (busy) return;
     setBusy({ id: request.id, action });
     setCardErrors(({ [request.id]: _drop, ...rest }) => rest);
+    let accepted = false;
     try {
       await act(request.id, action);
+      accepted = action === 'accept';
       Toast.show({
         type: 'success',
         text1: action === 'accept' ? 'Request accepted' : action === 'decline' ? 'Request declined' : 'Request cancelled',
@@ -214,6 +240,30 @@ export default function BorrowRequestsScreen() {
           ? 'These dates are no longer available: another request for them was accepted. You can decline this one.'
           : errorMessage(err);
       setCardErrors((e) => ({ ...e, [request.id]: text }));
+    } finally {
+      setBusy(null);
+    }
+    // Straight to the conversation so the lender can arrange the pickup. The
+    // request is already accepted whatever happens here.
+    if (accepted) {
+      try {
+        const conversation = await openForRequest(request.id);
+        router.push(`/chat/${conversation.id}`);
+      } catch {
+        Toast.show({ type: 'info', text1: 'Request accepted', text2: 'Open the chat from the Chat tab or this request when you are ready.' });
+      }
+    }
+  };
+
+  const openChat = async (request: BorrowRequest) => {
+    if (busy) return;
+    setBusy({ id: request.id, action: 'chat' });
+    setCardErrors(({ [request.id]: _drop, ...rest }) => rest);
+    try {
+      const conversation = await openForRequest(request.id);
+      router.push(`/chat/${conversation.id}`);
+    } catch (err) {
+      setCardErrors((e) => ({ ...e, [request.id]: errorMessage(err) }));
     } finally {
       setBusy(null);
     }
@@ -302,6 +352,7 @@ export default function BorrowRequestsScreen() {
             error={cardErrors[item.id] ?? null}
             onAction={(action) => onAction(item, action)}
             onOpenListing={() => router.push(`/item/${item.listing.id}`)}
+            onOpenChat={() => void openChat(item)}
           />
         )}
       />
@@ -341,6 +392,7 @@ const styles = StyleSheet.create({
   actionBtn: { flex: 1, flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center', borderRadius: Radii.md, paddingVertical: Spacing.sm + 2 },
   declineBtn: { borderWidth: 1.5, borderColor: Colors.rose + '66' },
   acceptBtn: { backgroundColor: Colors.sage },
+  chatBtn: { backgroundColor: '#1d4ed8' },
   actionText: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.bold },
   spinner: { marginTop: 60 },
   empty: { alignItems: 'center', paddingTop: 60, paddingHorizontal: Spacing.xl },

@@ -11,6 +11,8 @@ Supabase Auth (`auth.users`) owns identity and credentials. Passwords, tokens an
 | `audit_events` | Append-only log of security events with small, non-sensitive metadata | Triggers and the server only |
 | `listings` | Items offered for lending: title, description, category, condition, optional value/terms/area, availability, Teach Me flag, tags, `archived_at` | The owner (with their own token) |
 | `borrow_requests` | Requests to borrow a listing for inclusive dates: listing, lender (= listing owner), borrower, dates, optional message, status, decision/cancel times | The borrower (create, cancel) and lender (accept, decline), each with their own token |
+| `conversations` | One private chat per accepted borrow request: request, listing, borrower, lender (copied from the request), each side's last-read time, last message time | Created by the accept trigger or `open_conversation()`; never written by users |
+| `messages` | Text messages: conversation, sender, client id (idempotency key), body (1–2000 characters, not blank), time | Participants, each with their own token; immutable |
 | `listing_images` | Photo metadata: listing, owner, Storage path, type, size. Files live in the private Storage bucket `listing-images` | The owner |
 
 **Onboarding is modelled as independent records**, not one sequential state. Each verification has its own status (`not_started`, `pending`, `verified`, `rejected`, `expired`, `revoked`); profile completion is a server-maintained timestamp; account status (`active`, `restricted`, `suspended`, `deletion_pending`) is separate. `GET /auth/status` derives the onboarding stage from these.
@@ -94,6 +96,22 @@ The bucket is **private** with a 5 MB limit and `image/jpeg`, `image/png`, `imag
 | `authenticated` | read rows where borrower or lender; insert as borrower while `active` (columns `listing_id, borrower_id, start_date, end_date, message`); update `status` only, as a participant in good standing, subject to the trigger; no delete |
 | `service_role` | full, still subject to the triggers and the exclusion constraint |
 
+### Chat
+
+- Accepting a borrow request creates its conversation in the same transaction (trigger `borrow_requests_open_conversation`). `open_conversation(request_id)` gets or creates it for a participant of an accepted request; it returns null for anyone else and raises `NSC01` for a request that is not accepted. `borrow_request_id` is unique, so neither can create a duplicate. The migration also backfills conversations for requests that were already accepted.
+- Participants are copied from the request by the database. Request details cannot change after creation (borrow-request update trigger), so the copy cannot drift.
+- `send_message(conversation_id, client_id, body)` is SECURITY INVOKER: the insert policy decides. You can send only as yourself, only in your own conversation, only while its request is `accepted`, and only while your account is `active` or `restricted`. `(conversation_id, sender_id, client_id)` is unique; a retry returns the stored row with `created = false`, and the same id with different text raises `NSC03`.
+- Messages have no update or delete grants. `id` and `created_at` are not insertable, so the database always sets them.
+- `list_messages(...)` is SECURITY INVOKER (row-level security filters it); it pages newest first with a `(created_at, id)` cursor. `list_conversations(...)` is SECURITY DEFINER to read the other participant's display name; it returns only the caller's conversations. `mark_conversation_read(...)` updates only the caller's own read time.
+- Archiving a listing does not close its conversations (accepted requests are kept).
+- Custom SQLSTATEs `NSC01`–`NSC03` are mapped to API codes in `src/chat/supabase-chat.repository.ts`.
+
+| Role | `conversations` | `messages` |
+| --- | --- | --- |
+| `anon` | none | none |
+| `authenticated` | read where borrower or lender | read in own conversations; insert (columns `conversation_id, sender_id, client_id, body`) per the policy above; no update or delete |
+| `service_role` | full | full |
+
 ## Access control
 
 Defence in depth: the API checks first, and the database enforces the same rules independently, so a client holding a valid token and calling Supabase directly gains nothing.
@@ -131,6 +149,7 @@ Migrations live in `supabase/migrations/` and are applied with the Supabase CLI 
 | --- | --- |
 | `20261020120000_auth_foundation.sql` | Types, tables, triggers, RLS, grants |
 | `20261020130000_tighten_service_role_grants.sql` | Makes `audit_events` append-only for `service_role` too; blocks `TRUNCATE` |
+| `20261103120000_chat.sql` | Conversations and messages, the accept trigger, chat functions, RLS. Needs `20261102120000_borrow_requests.sql` first. **Not applied to the dev project.** Until it is, chat endpoints answer `503 DATABASE_UNAVAILABLE` |
 | `20261102120000_borrow_requests.sql` | Borrow requests, lifecycle triggers, the no-overlap exclusion constraint (`btree_gist`), RLS and read helpers. **Not applied to the dev project** (checked 2026-11-02: `borrow_requests` returns `PGRST205`). Until it is, borrow endpoints answer `503 DATABASE_UNAVAILABLE` |
 | `20261028120000_listings.sql` | Listings, listing photos, `search_listings`, RLS, the private `listing-images` bucket and its Storage policies. **Not yet applied to the dev project** (checked 2026-10-28: `listings` returns `PGRST205`, the bucket `NoSuchBucket`). Until it is, listing reads answer `503 DATABASE_UNAVAILABLE` and photo uploads `503 STORAGE_NOT_CONFIGURED` |
 | `20261026120000_phone_verification.sql` | Phone verification columns and `phone_verification_*` functions (service role only). **Not yet applied to the dev project** (re-checked 2026-10-28: `profiles.pending_phone_e164` returns `42703 undefined_column`). Until it is, every phone endpoint answers `503 PHONE_VERIFICATION_NOT_CONFIGURED` with `reason: database_migration_missing` |
@@ -164,6 +183,12 @@ Always read the dry run first and confirm the linked project is the intended one
 - [ ] **Authentication → Rate Limits:** review the email-send limit (raise it on the dev project so the signup tests can run).
 - [ ] Revoke the personal access token when not running migrations, and clear `SUPABASE_DB_PASSWORD` from `.env`.
 - [ ] Use a separate Supabase project for production; never set `INTEGRATION_PROJECT_REF` there.
+
+### Chat (Phase 2C)
+
+- [ ] Apply the borrow-request migration first (below), then `20261103120000_chat.sql`: run `npm.cmd run db:push:dry`, check that it lists both files in that order, then `npm.cmd run db:push`. If the CLI is not logged in, run `npm.cmd run db:login` and `npm.cmd run db:link` first.
+- [ ] No new environment variables and no dashboard settings. Supabase Realtime is not used; Socket.IO runs in the API.
+- [ ] Afterwards, check with two accounts (see [API.md](API.md#testing-chat-with-two-accounts)).
 
 ### Borrow requests (Phase 2B)
 

@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Colors, Typography, Shadows } from '../../utils/theme';
 import { BlurView } from 'expo-blur';
 import { Platform } from 'react-native';
+import { useChat } from '../../context/ChatContext';
 
 type TabIconProps = { name: any; focused: boolean; label: string; badge?: number };
 
@@ -28,6 +29,7 @@ function TabIcon({ name, focused, label, badge }: TabIconProps) {
 }
 
 export default function TabLayout() {
+  const { unreadTotal } = useChat();
   return (
     <Tabs
       screenOptions={{
@@ -63,6 +65,20 @@ export default function TabLayout() {
         options={{
           tabBarIcon: ({ focused }) => (
             <TabIcon name={focused ? 'swap-horizontal' : 'swap-horizontal-outline'} focused={focused} label="Activity" badge={1} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="chat"
+        options={{
+          tabBarAccessibilityLabel: unreadTotal ? `Chat, ${unreadTotal} unread` : 'Chat',
+          tabBarIcon: ({ focused }) => (
+            <TabIcon
+              name={focused ? 'chatbubbles' : 'chatbubbles-outline'}
+              focused={focused}
+              label="Chat"
+              {...(unreadTotal ? { badge: unreadTotal } : {})}
+            />
           ),
         }}
       />

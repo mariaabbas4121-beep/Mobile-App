@@ -4,6 +4,9 @@ import type {
   BorrowRequestInput,
   BorrowRequestPage,
   BorrowStatus,
+  ChatMessage,
+  Conversation,
+  ConversationPage,
   DateRange,
   FieldIssue,
   ImageUploadType,
@@ -13,6 +16,7 @@ import type {
   ListingPage,
   ListingQuery,
   LogoutScope,
+  MessagePage,
   OnboardingStatus,
   PhoneStartResult,
   PhoneVerification,
@@ -280,6 +284,28 @@ export function createApiClient({
         body: {},
         accessToken,
       }),
+
+    // Chat. Participants come from the borrow request on the server; the
+    // client only ever names a request or conversation id.
+    listConversations: (accessToken: string, query: { page?: number; pageSize?: number } = {}) =>
+      request<ConversationPage>({ method: 'GET', path: '/conversations', query: { ...query }, accessToken }),
+    // Get-or-create for an accepted borrow request.
+    openConversation: (accessToken: string, borrowRequestId: string) =>
+      request<{ conversation: Conversation }>({ method: 'POST', path: '/conversations', body: { borrowRequestId }, accessToken }),
+    getConversation: (accessToken: string, id: string) =>
+      request<{ conversation: Conversation }>({ method: 'GET', path: `/conversations/${encodeURIComponent(id)}`, accessToken }),
+    listMessages: (accessToken: string, id: string, query: { before?: string; limit?: number } = {}) =>
+      request<MessagePage>({ method: 'GET', path: `/conversations/${encodeURIComponent(id)}/messages`, query: { ...query }, accessToken }),
+    // REST fallback for when the socket is down. Safe to retry with the same clientId.
+    sendMessage: (accessToken: string, id: string, input: { clientId: string; body: string }) =>
+      request<{ message: ChatMessage; duplicate: boolean }>({
+        method: 'POST',
+        path: `/conversations/${encodeURIComponent(id)}/messages`,
+        body: input,
+        accessToken,
+      }),
+    markConversationRead: (accessToken: string, id: string) =>
+      request<{ conversation: Conversation }>({ method: 'POST', path: `/conversations/${encodeURIComponent(id)}/read`, body: {}, accessToken }),
 
     deleteItemImage: (accessToken: string, id: string, imageId: string) =>
       request<void>({
