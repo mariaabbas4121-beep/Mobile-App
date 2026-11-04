@@ -32,6 +32,8 @@ import type { BorrowRequestRepository } from './borrow/borrow.types.js';
 import { unconfiguredBorrowRequests } from './borrow/supabase-borrow.repository.js';
 import { unconfiguredChatService, type ChatService } from './chat/chat.service.js';
 import { conversationRoutes } from './routes/conversation.routes.js';
+import { activityRoutes } from './routes/activity.routes.js';
+import { createActivityService } from './activity/activity.js';
 
 export interface AppDeps {
   config: Config;
@@ -109,7 +111,7 @@ export function createApp({
   app.use(
     cors({
       origin: config.corsOrigins,
-      methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
       allowedHeaders: ['Authorization', 'Content-Type'],
       exposedHeaders: ['X-Request-Id', 'RateLimit', 'RateLimit-Policy', 'Retry-After'],
       maxAge: 600,
@@ -144,6 +146,10 @@ export function createApp({
     borrowRequestRoutes({ gateway: authGateway, profiles, listings, borrowRequests, limiters: createBorrowLimiters(rateLimits), now }),
   );
   app.use('/api/v1/conversations', conversationRoutes({ gateway: authGateway, chat }));
+  app.use(
+    '/api/v1/activity',
+    activityRoutes({ gateway: authGateway, activity: createActivityService({ listings, borrowRequests, chat, logger }) }),
+  );
   app.use('/api/v1/items', listingRoutes({ gateway: authGateway, profiles, listings, limiters: createListingLimiters(rateLimits) }));
 
   app.use(notFound);

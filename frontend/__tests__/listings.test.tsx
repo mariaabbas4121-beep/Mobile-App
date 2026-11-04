@@ -6,13 +6,15 @@ import { AuthProvider } from '../context/AuthContext';
 import { ListingsProvider } from '../context/ListingsContext';
 import { BorrowRequestsProvider } from '../context/BorrowRequestsContext';
 import { AppProvider } from '../context/AppContext';
+import { DiscoveryProvider } from '../context/DiscoveryContext';
+import type { LocationService } from '../lib/location/deviceLocation';
 import BrowseScreen from '../app/(tabs)/index';
 import ItemDetailScreen from '../app/item/[id]';
 import LendNewScreen from '../app/lend/new';
 import type { ApiClient } from '../lib/api/client';
 import { photoType, toLocalPhoto } from '../lib/listings/photos';
 import { validateListingForm, type ListingForm } from '../lib/listings/validation';
-import { apiError, fakeApi, listing, services, session } from './support/fakes';
+import { apiError, fakeApi, fakeLocation, listing, services, session } from './support/fakes';
 
 const mockRouter = { replace: jest.fn(), push: jest.fn(), back: jest.fn(), canGoBack: jest.fn(() => true) };
 let mockParams: Record<string, string> = {};
@@ -52,7 +54,9 @@ async function renderApp(element: React.ReactElement, s = services()) {
     <AuthProvider services={s.asServices}>
       <ListingsProvider services={{ api: s.api as unknown as ApiClient, sessionManager: s.sessionManager }}>
         <BorrowRequestsProvider services={{ api: s.api as unknown as ApiClient, sessionManager: s.sessionManager }}>
-          <AppProvider>{element}</AppProvider>
+          <DiscoveryProvider location={fakeLocation() as unknown as LocationService}>
+            <AppProvider>{element}</AppProvider>
+          </DiscoveryProvider>
         </BorrowRequestsProvider>
       </ListingsProvider>
     </AuthProvider>,
@@ -74,8 +78,8 @@ describe('Browse feed', () => {
     await act(async () => release(page([listing({ title: 'Canon camera' })])));
 
     expect(await screen.findByText('Canon camera')).toBeTruthy();
-    expect(screen.getByText('1 item available to borrow')).toBeTruthy();
-    expect(api.listItems).toHaveBeenCalledWith({ page: 1, pageSize: 20 }, 'access-1');
+    expect(screen.getByText('1 item in all areas, newest first')).toBeTruthy();
+    expect(api.listItems).toHaveBeenCalledWith({ owner: 'others', page: 1, pageSize: 20 }, 'access-1');
   });
 
   test('shows an empty state when there are no listings', async () => {
@@ -101,10 +105,10 @@ describe('Browse feed', () => {
     await screen.findByText('No items yet');
 
     await press('Electronics');
-    await waitFor(() => expect(api.listItems).toHaveBeenLastCalledWith({ category: 'electronics', page: 1, pageSize: 20 }, 'access-1'));
+    await waitFor(() => expect(api.listItems).toHaveBeenLastCalledWith({ category: 'electronics', owner: 'others', page: 1, pageSize: 20 }, 'access-1'));
     await type('Search items', '  drill ');
     await waitFor(() =>
-      expect(api.listItems).toHaveBeenLastCalledWith({ q: 'drill', category: 'electronics', page: 1, pageSize: 20 }, 'access-1'),
+      expect(api.listItems).toHaveBeenLastCalledWith({ q: 'drill', category: 'electronics', owner: 'others', page: 1, pageSize: 20 }, 'access-1'),
     );
     expect(await screen.findByText('Nothing found')).toBeTruthy();
   });
@@ -207,8 +211,9 @@ describe('Lend screen', () => {
       condition: 'good',
       replacementValuePkr: 15000,
       borrowingTerms: null,
-      // Defaults to the profile neighborhood (fakes: Gulberg).
+      // Defaults to the profile neighborhood and city (fakes: Gulberg, Lahore).
       area: 'Gulberg',
+      city: 'Lahore',
       teachMeEnabled: false,
       tags: [],
     });
@@ -343,6 +348,7 @@ describe('listing form rules', () => {
     replacementValue: '',
     borrowingTerms: '',
     area: '',
+    city: '',
     tags: '',
     teachMeEnabled: false,
   };

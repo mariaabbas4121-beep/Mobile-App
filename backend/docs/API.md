@@ -7,9 +7,10 @@ This is the contract the mobile app integrates against. Everything here is imple
 - [Auth](#auth): [signup](#post-apiv1authsignup), [login](#post-apiv1authlogin), [refresh](#post-apiv1authrefresh), [resend confirmation](#post-apiv1authemailresend), [logout](#post-apiv1authlogout), [me](#get-apiv1authme), [status](#get-apiv1authstatus)
 - [Profile](#profile): [update](#patch-apiv1profileme)
 - [Phone verification](#phone-verification): [status](#get-apiv1verificationphone), [start](#post-apiv1verificationphonestart), [resend](#post-apiv1verificationphoneresend), [confirm](#post-apiv1verificationphoneconfirm)
-- [Listings](#listings): [list](#get-apiv1items), [get](#get-apiv1itemsid), [create](#post-apiv1items), [update](#patch-apiv1itemsid), [archive](#delete-apiv1itemsid), [add photo](#post-apiv1itemsidimages), [remove photo](#delete-apiv1itemsidimagesimageid)
+- [Listings](#listings): [list](#get-apiv1items), [get](#get-apiv1itemsid), [create](#post-apiv1items), [update](#patch-apiv1itemsid), [archive](#delete-apiv1itemsid), [add photo](#post-apiv1itemsidimages), [remove photo](#delete-apiv1itemsidimagesimageid), [nearby search and pickup spots](#nearby-discovery-and-pickup-locations)
 - [Borrow requests](#borrow-requests): [create](#post-apiv1borrow-requests), [lists](#get-apiv1borrow-requestsoutgoing-and-incoming), [get](#get-apiv1borrow-requestsid), [accept · decline · cancel](#post-apiv1borrow-requestsidaccept--decline--cancel), [booked dates](#get-apiv1itemsidbooked-dates)
 - [Chat](#chat): [list](#get-apiv1conversations), [open](#post-apiv1conversations), [get](#get-apiv1conversationsid), [history](#get-apiv1conversationsidmessages), [send](#post-apiv1conversationsidmessages), [mark read](#post-apiv1conversationsidread), [Socket.IO events](#socketio), [two-device test](#testing-chat-with-two-accounts), [limitations](#known-limitations)
+- [Activity](#activity): [recent activity](#get-apiv1activity)
 - [Email confirmation flow](#email-confirmation-flow)
 - [Error codes](#error-codes)
 - [Rate limits](#rate-limits)
@@ -405,6 +406,9 @@ Items users offer to lend. Reads are public; writes need a token and act only on
   "replacementValuePkr": 15000,
   "borrowingTerms": "Return within 3 days",
   "area": "UAF Hostel 3",
+  "city": "Faisalabad",
+  "approximateLocation": { "latitude": 31.441, "longitude": 73.071 },
+  "distanceKm": null,
   "availability": "available",
   "teachMeEnabled": false,
   "tags": ["DIY", "Home"],
@@ -448,8 +452,10 @@ Public. A token is optional; if an `Authorization` header is sent it must be val
 | `q` | Up to 100 characters. Every word must appear (case-insensitive) in the title, description or tags |
 | `category`, `condition`, `availability` | Exact filters |
 | `owner=me` | Only the caller's own listings (token required) |
+| `owner=others` | Everyone else's listings: the caller's own are left out, in every kind of search (nearby, city, words, filters) and in `total` and pagination. Who "the caller" is comes from the token only. Without a token nothing is excluded. Used by the app's Browse feed and map. Needs migration `20261105120000_browse_exclude_owner.sql` |
 | `includeArchived=true` | With `owner=me`: include the caller's archived listings |
-| `sort` | `newest` (default), `oldest`, `title` |
+| `sort` | `newest` (default), `oldest`, `title`; `distance` for nearby searches (see [nearby discovery](#nearby-discovery-and-pickup-locations)) |
+| `lat`, `lng`, `radiusKm`, `city` | Nearby or city-wide discovery, see below |
 | `page`, `pageSize` | Default 1 and 20; `pageSize` at most 50 |
 
 `200`:
@@ -499,6 +505,62 @@ Postman: Body → *binary* → choose the file, and set the `Content-Type` heade
 ### `DELETE /api/v1/items/:id/images/:imageId`
 
 Token required; owner only. Removes the photo record and its file. `204`. Errors: `403 FORBIDDEN`, `404 LISTING_NOT_FOUND` / `IMAGE_NOT_FOUND`. If deleting the file itself fails, the photo is still gone from the listing and the orphaned file is logged.
+
+### Nearby discovery and pickup locations
+
+Listings can carry a **pickup spot**: where the owner is happy to hand the item over. It is optional; it is set only when the owner chooses one in the lend form, and it never follows the owner around.
+
+**What others see.** Nobody but the owner ever receives the precise spot. Everyone else gets `approximateLocation`: the spot moved 200–400 m in a direction that is random, secret and fixed per owner, then rounded to 3 decimals (about 110 m). Treat it as "about 0.5 km from the real spot".
+
+**Distances.** `distanceKm` and the radius filter are computed from `approximateLocation`, not from the precise spot. The search accepts any coordinates and any radius, so measuring from the precise spot would let someone pin it down by searching from a few places or shrinking the radius. As a result, distances are approximate (about ±0.5 km) and are shown as "About 1.2 km away".
+
+**Listings without a pickup spot** never appear in nearby results, because their distance is unknown. They still appear in city-wide browsing (`city=`) and in unrestricted browsing, and the app labels them "no map spot".
+
+Nearby search on `GET /api/v1/items`:
+
+| Query | Meaning |
+| --- | --- |
+| `lat`, `lng` | Search origin, sent together. `lat` −90..90, `lng` −180..180. An empty value counts as absent |
+| `radiusKm` | 0.5–50, default 3. Only with `lat`/`lng` |
+| `city` | City-wide, case-insensitive. Not combined with `lat`/`lng` |
+| `sort` | Defaults to `distance` (nearest first) when `lat`/`lng` are sent; `distance` without them is refused |
+
+All the usual filters (`q`, `category`, `condition`, `availability`) and pagination still apply. Only listings whose `approximateLocation` lies within `radiusKm` are returned; a listing in another city is never "nearby". The response adds `scope`, so the app can label the results:
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "5d0c6f8e-…",
+        "title": "Bosch power drill",
+        "area": "UAF Hostel 3",
+        "city": "Faisalabad",
+        "approximateLocation": { "latitude": 31.441, "longitude": 73.071 },
+        "distanceKm": 1.2,
+        "…": "other listing fields"
+      }
+    ],
+    "pagination": { "page": 1, "pageSize": 20, "total": 1, "totalPages": 1 },
+    "scope": { "mode": "nearby", "radiusKm": 3 }
+  }
+}
+```
+
+`scope` is `{ "mode": "nearby", "radiusKm": n }`, `{ "mode": "city", "city": "…" }` or `{ "mode": "all" }`. Errors: `400 VALIDATION_ERROR`, with `details` naming `lat`, `lng`, `radiusKm`, `city` or `sort`.
+
+### `GET /api/v1/items/:id/location`
+
+Token required; owner only (`403` otherwise). The precise pickup spot, for the edit form: `200 { "data": { "location": { "latitude": 31.4312, "longitude": 73.0746, "updatedAt": "…" } } }`, or `"location": null` when none is set.
+
+### `PUT /api/v1/items/:id/location`
+
+Token required; owner only; account `active`; listing not archived. Body (strict): `{ "latitude": 31.4312, "longitude": 73.0746 }`. `200 { "data": { "location": { … }, "listing": { …, "approximateLocation": { … } } } }`. Errors: `400 VALIDATION_ERROR` / `INVALID_LOCATION`, `403`, `404 LISTING_NOT_FOUND`, `409 LISTING_ARCHIVED`, `429 RATE_LIMITED`. Editing other listing fields never moves the spot.
+
+### `DELETE /api/v1/items/:id/location`
+
+Token required; owner only; listing not archived. Removes the spot; the listing then appears only city-wide. `204`.
 
 ## Borrow requests
 
@@ -711,6 +773,48 @@ Typing indicators are not implemented. Limits: 30 messages per minute per user (
 - Text only: no images or attachments.
 - Messages cannot be edited, deleted or reported yet.
 
+## Activity
+
+### `GET /api/v1/activity`
+
+Token required. The caller's own recent activity, newest first. Nothing is stored for it: it is derived on each request from records the caller can already read, each queried with the caller's token so Row-Level Security applies. The sources are the 50 most recent borrow requests on each side, conversations and own listings. It takes no user id.
+
+Query: `limit` 1–100, default 50.
+
+| `type` | When | `actor` |
+| --- | --- | --- |
+| `request_received` | Someone asked to borrow one of your items | Borrower |
+| `request_sent` | You asked to borrow an item | You |
+| `request_accepted`, `request_declined` | The lender answered (`decidedAt`) | Lender |
+| `request_cancelled` | The borrower withdrew (`cancelledAt`) | Borrower |
+| `message` | Latest message of a conversation; `preview` holds its first 120 characters | Sender |
+| `listing_created`, `listing_archived` | Your listing was created or removed | You |
+
+Listing edits are not included, because `updated_at` also changes for availability and photo changes, so it is not a reliable "edited" event.
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "request:5d0c…:accepted",
+        "type": "request_accepted",
+        "occurredAt": "2026-11-04T10:12:00.000Z",
+        "actor": { "id": "…", "displayName": "Ahmed", "isYou": false },
+        "listing": { "id": "…", "title": "Camping tent", "imageUrl": null },
+        "request": { "id": "5d0c…", "status": "accepted", "startDate": "2026-11-12", "endDate": "2026-11-14", "viewerRole": "borrower" },
+        "conversationId": null,
+        "preview": null
+      }
+    ],
+    "unavailable": []
+  }
+}
+```
+
+`unavailable` names any source (`borrowRequests`, `conversations`, `listings`) that could not be read this time; the others are still returned. If all of them fail, the response is the first error (usually `503 DATABASE_UNAVAILABLE`). Errors: `401`, `400 VALIDATION_ERROR` (`limit`).
+
 ## Email confirmation flow
 
 1. The app calls `POST /auth/signup` and shows the `202` message.
@@ -762,6 +866,7 @@ The API has no endpoint for step 2: Supabase handles the link itself. How the mo
 | 409 | `LISTING_ARCHIVED` | Listings: change or photo upload on an archived listing |
 | 409 | `IMAGE_LIMIT_REACHED` | Listing photo upload: already 5 photos |
 | 400 | `INVALID_LISTING` | Listings: a database constraint refused a value |
+| 400 | `INVALID_LOCATION` | Pickup spot: the database refused the coordinates (normally caught first as `VALIDATION_ERROR`) |
 | 400 | `EMPTY_IMAGE` | Listing photo upload with an empty body |
 | 415 | `UNSUPPORTED_IMAGE_TYPE` | Listing photo upload: not JPEG/PNG/WebP, or content does not match `Content-Type` |
 | 409 | `EMAIL_ALREADY_REGISTERED` | Signup, only if email confirmation is disabled |
@@ -801,6 +906,7 @@ Limits are per API process. Several instances behind a load balancer need a shar
 | `POST /verification/phone/confirm` | 10 / 15 min | Account |
 | `POST /items` | 20 / hour | Account |
 | `POST /items/:id/images` | 60 / hour | Account |
+| `PUT /items/:id/location` | 60 / hour | Account |
 | `POST /borrow-requests` | 20 / hour | Account |
 | Chat messages (REST and socket together) | 30 / minute | Account |
 | Socket.IO events | 120 / minute | Socket |

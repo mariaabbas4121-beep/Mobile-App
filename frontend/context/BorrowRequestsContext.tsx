@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import type { ApiClient } from '../lib/api/client';
-import type { BorrowRequest, BorrowRequestInput, BorrowRequestPage, DateRange } from '../lib/api/types';
+import type { ActivityFeed, BorrowRequest, BorrowRequestInput, BorrowRequestPage, DateRange } from '../lib/api/types';
 import type { SessionManager } from '../lib/auth/sessionManager';
 
 export interface BorrowRequestsServices {
@@ -18,6 +18,8 @@ export interface BorrowRequestsContextValue {
   listIncoming: () => Promise<BorrowRequestPage>;
   act: (id: string, action: BorrowAction) => Promise<BorrowRequest>;
   bookedDates: (listingId: string) => Promise<DateRange[]>;
+  // The signed-in user's recent activity (requests, chats, own listings).
+  activity: () => Promise<ActivityFeed>;
 }
 
 const BorrowRequestsContext = createContext<BorrowRequestsContextValue | null>(null);
@@ -77,9 +79,11 @@ export function BorrowRequestsProvider({ children, services }: { children: React
     [api, sessionManager],
   );
 
+  const activity = useCallback(() => sessionManager.authorized((t) => api.getActivity(t, { limit: 50 })), [api, sessionManager]);
+
   const value = useMemo<BorrowRequestsContextValue>(
-    () => ({ revision, create, listOutgoing, listIncoming, act, bookedDates }),
-    [revision, create, listOutgoing, listIncoming, act, bookedDates],
+    () => ({ revision, create, listOutgoing, listIncoming, act, bookedDates, activity }),
+    [revision, create, listOutgoing, listIncoming, act, bookedDates, activity],
   );
 
   return <BorrowRequestsContext.Provider value={value}>{children}</BorrowRequestsContext.Provider>;

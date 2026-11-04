@@ -2,12 +2,15 @@ import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
   TextInput, ScrollView, Image, Dimensions, ActivityIndicator, RefreshControl,
 } from 'react-native';
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '../../context/AppContext';
 import { useListings } from '../../context/ListingsContext';
+import { useDiscovery } from '../../context/DiscoveryContext';
+import { AreaBar, AreaPicker, LocationCard, RadiusChips } from '../../components/discovery/DiscoveryControls';
+import { formatDistance, nextRadius } from '../../lib/location/geo';
 import type { Listing, ListingCategory } from '../../lib/api/types';
 import { errorMessage } from '../../lib/auth/messages';
 import { CATEGORY_OPTIONS, conditionLabel } from '../../lib/listings/options';
@@ -61,6 +64,11 @@ function ItemCard({ item, onPress }: { item: Listing; onPress: () => void }) {
           }]} />
           <Text style={styles.cardCondition}>{conditionLabel(item.condition)}</Text>
         </View>
+        {item.distanceKm !== null ? (
+          <Text style={styles.cardDistance} numberOfLines={1}>{formatDistance(item.distanceKm)}</Text>
+        ) : item.city && !item.approximateLocation ? (
+          <Text style={styles.cardDistance} numberOfLines={1}>In {item.city} · no map spot</Text>
+        ) : null}
         <View style={styles.ownerRow}>
           <View style={[styles.ownerAvatar, styles.ownerInitialWrap]}>
             <Text style={styles.ownerInitial}>{ownerName.charAt(0).toUpperCase()}</Text>
@@ -76,23 +84,22 @@ export default function BrowseScreen() {
   const router = useRouter();
   const { searchQuery, setSearchQuery, activeCategory, setActiveCategory } = useApp();
   const category = activeCategory === 'all' ? null : (activeCategory as ListingCategory);
-  const feed = useListingFeed({ query: searchQuery, category });
+  const discovery = useDiscovery();
+  const feed = useListingFeed({ query: searchQuery, category, scope: discovery.scope, enabled: discovery.ready });
   const { lastCreatedId } = useListings();
+  const [picking, setPicking] = useState(false);
+  const nearby = discovery.area.kind === 'device' || discovery.area.kind === 'place';
+  const wider = nearby ? nextRadius(discovery.radiusKm) : null;
 
   // Coming back to this tab (e.g. after listing an item) reloads only if
   // the list is behind a change or its last background reload failed.
   const { refreshIfStale } = feed;
   useFocusEffect(useCallback(() => refreshIfStale(), [refreshIfStale]));
 
-  // The user's own search or category hides the item they just listed. Say
-  // so, and let them clear the filters; never change them silently.
-  const newListingHidden =
-    feed.upToDate && feed.filtered && lastCreatedId !== null && !feed.items.some((i) => i.id === lastCreatedId);
-
-  const showAll = () => {
-    setSearchQuery('');
-    setActiveCategory('all');
-  };
+  // Browse lists other people's items only, so a just-listed item is never
+  // here. Say where it is instead, until dismissed.
+  const [dismissedCreated, setDismissedCreated] = useState<string | null>(null);
+  const showCreatedNote = lastCreatedId !== null && dismissedCreated !== lastCreatedId;
 
   const renderHeader = () => (
     <>
@@ -104,16 +111,39 @@ export default function BrowseScreen() {
           </TouchableOpacity>
         </View>
       ) : null}
-      {newListingHidden ? (
+      {showCreatedNote ? (
         <View style={styles.notice}>
-          <Text style={styles.noticeText}>Your new listing is hidden by the current search or category.</Text>
-          <TouchableOpacity onPress={showAll} accessibilityRole="button" accessibilityLabel="Show all items">
-            <Text style={styles.noticeAction}>Show all</Text>
+          <Text style={styles.noticeText}>
+            Your item is listed. Browse shows other people’s items; yours are in Profile → My Listings.
+          </Text>
+          <TouchableOpacity onPress={() => router.push('/listings/mine')} accessibilityRole="button" accessibilityLabel="Open My Listings">
+            <Text style={styles.noticeAction}>My Listings</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setDismissedCreated(lastCreatedId)} accessibilityRole="button" accessibilityLabel="Dismiss">
+            <Text style={styles.noticeAction}>Dismiss</Text>
           </TouchableOpacity>
         </View>
       ) : null}
+      <LocationCard onChooseArea={() => setPicking(true)} />
       {feed.status === 'ready' && feed.total > 0 ? (
-        <Text style={styles.resultCount}>{feed.total} {feed.total === 1 ? 'item' : 'items'} available to borrow</Text>
+        <Text style={styles.resultCount}>
+          {feed.total} {feed.total === 1 ? 'item' : 'items'}{' '}
+          {nearby
+            ? `within ${discovery.radiusKm} km, nearest first`
+            : discovery.area.kind === 'city'
+              ? `in ${discovery.area.city}, newest first`
+              : 'in all areas, newest first'}
+        </Text>
+      ) : null}
+      {feed.status === 'ready' && nearby && feed.total > 0 && feed.total < 3 && wider && !feed.filtered ? (
+        <TouchableOpacity
+          style={styles.expandInline}
+          onPress={() => discovery.setRadius(wider)}
+          accessibilityRole="button"
+          accessibilityLabel={`Expand to ${wider} km`}
+        >
+          <Text style={styles.noticeAction}>Only a few nearby. Expand to {wider} km</Text>
+        </TouchableOpacity>
       ) : null}
     </>
   );
@@ -139,6 +169,31 @@ export default function BrowseScreen() {
       );
     }
     const filtered = feed.filtered;
+    if (nearby) {
+      return (
+        <View style={styles.emptyState}>
+          <Text style={styles.emptyEmoji}>📍</Text>
+          <Text style={styles.emptyTitle}>{filtered ? 'Nothing nearby matches' : 'No items nearby'}</Text>
+          <Text style={styles.emptyDesc}>
+            Nothing {filtered ? 'matching your search ' : ''}within {discovery.radiusKm} km of{' '}
+            {discovery.area.kind === 'device' ? 'you' : discovery.label.replace(/^Near /, '')}.
+          </Text>
+          {wider ? (
+            <TouchableOpacity
+              style={styles.retryBtn}
+              onPress={() => discovery.setRadius(wider)}
+              accessibilityRole="button"
+              accessibilityLabel={`Expand to ${wider} km`}
+            >
+              <Text style={styles.retryText}>Expand to {wider} km</Text>
+            </TouchableOpacity>
+          ) : null}
+          <TouchableOpacity style={styles.linkBtn} onPress={() => setPicking(true)} accessibilityRole="button" accessibilityLabel="Choose another area">
+            <Text style={styles.noticeAction}>Choose another area</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
     return (
       <View style={styles.emptyState}>
         <Text style={styles.emptyEmoji}>{filtered ? '🔍' : '📦'}</Text>
@@ -190,6 +245,22 @@ export default function BrowseScreen() {
             ) : null}
           </View>
 
+          <View style={styles.areaRow}>
+            <View style={{ flex: 1 }}>
+              <AreaBar onChange={() => setPicking(true)} />
+            </View>
+            <TouchableOpacity
+              style={styles.mapToggle}
+              onPress={() => router.navigate('/map')}
+              accessibilityRole="button"
+              accessibilityLabel="Show on map"
+            >
+              <Ionicons name="map-outline" size={15} color={Colors.green || '#2e7d32'} />
+              <Text style={styles.mapToggleText}>Map</Text>
+            </TouchableOpacity>
+          </View>
+          <RadiusChips />
+
           {/* Categories Horizontal Scroller */}
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.catScroll} contentContainerStyle={styles.catContent}>
             {FILTERS.map(cat => (
@@ -238,6 +309,7 @@ export default function BrowseScreen() {
           />
         )}
       />
+      <AreaPicker visible={picking} onClose={() => setPicking(false)} />
     </View>
   );
 }
@@ -294,6 +366,15 @@ const styles = StyleSheet.create({
   },
   noticeText: { flex: 1, fontSize: Typography.sizes.sm, color: Colors.greenDark || '#1b5e20' },
   noticeAction: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.bold, color: Colors.green || '#2e7d32' },
+  areaRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  mapToggle: {
+    flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: Spacing.sm,
+    borderWidth: 1, borderColor: Colors.fog, borderRadius: Radii.full, paddingHorizontal: Spacing.sm, paddingVertical: 4,
+  },
+  mapToggleText: { fontSize: Typography.sizes.xs, fontWeight: Typography.weights.bold, color: Colors.greenDark || '#1b5e20' },
+  expandInline: { marginTop: -Spacing.sm, marginBottom: Spacing.md },
+  linkBtn: { marginTop: Spacing.md },
+  cardDistance: { fontSize: Typography.sizes.xs, color: Colors.green || '#2e7d32', fontWeight: Typography.weights.semibold, marginBottom: 6 },
   resultCount: { fontSize: Typography.sizes.sm, color: Colors.slate, marginBottom: Spacing.md, fontWeight: Typography.weights.medium },
   card: {
     width: CARD_WIDTH, backgroundColor: Colors.white,

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useListings } from '../../context/ListingsContext';
-import type { Listing, ListingCategory } from '../api/types';
+import type { FeedScope } from '../../context/DiscoveryContext';
+import type { Listing, ListingCategory, ListingQuery } from '../api/types';
 
 export const FEED_PAGE_SIZE = 20;
 export const SEARCH_DEBOUNCE_MS = 350;
@@ -16,8 +17,31 @@ type LoadMode = 'initial' | 'quiet' | 'refresh';
 // reflects. A change anywhere in the app (create, edit, archive) bumps the
 // revision; the feed then reloads in the background once, and again when the
 // screen regains focus if that reload has not succeeded yet.
-export function useListingFeed({ query, category }: { query: string; category: ListingCategory | null }) {
+//
+// Only other people's listings (owner=others; the server excludes the
+// signed-in user's own). Your own are under Profile → My Listings.
+//
+// Scope: nearby (origin and radius) or city-wide; null searches everywhere.
+// While `enabled` is false (e.g. the location is still being read) nothing
+// is requested and the feed stays in its loading state.
+export function useListingFeed({
+  query,
+  category,
+  scope = null,
+  enabled = true,
+  pageSize = FEED_PAGE_SIZE,
+}: {
+  query: string;
+  category: ListingCategory | null;
+  scope?: FeedScope;
+  enabled?: boolean;
+  pageSize?: number;
+}) {
   const { list, revision } = useListings();
+  // Compared by value, so an equal scope never causes a reload.
+  const scopeKey = JSON.stringify(scope);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const scopeQuery = useMemo(() => toScopeQuery(scope), [scopeKey]);
   const [items, setItems] = useState<Listing[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -60,8 +84,10 @@ export function useListingFeed({ query, category }: { query: string; category: L
         const result = await list({
           ...(debounced ? { q: debounced } : {}),
           ...(category ? { category } : {}),
+          ...scopeQuery,
+          owner: 'others',
           page: 1,
-          pageSize: FEED_PAGE_SIZE,
+          pageSize,
         });
         if (ticket !== latest.current) return;
         setItems(result.items);
@@ -89,28 +115,36 @@ export function useListingFeed({ query, category }: { query: string; category: L
         }
       }
     },
-    [list, debounced, category],
+    [list, debounced, category, scopeQuery, pageSize],
   );
   const loadRef = useRef(load);
   loadRef.current = load;
 
-  // New filters show the loading state.
+  // New filters or a new area show the loading state.
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   useEffect(() => {
+    if (!enabled) {
+      // Anything in flight is for an area no longer wanted.
+      latest.current += 1;
+      setStatus('loading');
+      return;
+    }
     void load('initial');
-  }, [load]);
+  }, [load, enabled]);
 
   // A change made elsewhere reloads in the background, once per revision.
   // Deliberately keyed on `revision` only: a filter change is handled above.
   // A load already in flight catches up when it finishes (see `load`).
   useEffect(() => {
-    if (itemsRevisionRef.current === revision || inFlight.current !== null) return;
+    if (!enabledRef.current || itemsRevisionRef.current === revision || inFlight.current !== null) return;
     void loadRef.current(statusRef.current === 'ready' ? 'quiet' : 'initial');
   }, [revision]);
 
   // For the screen's focus handler: reload only if the list is behind the
   // latest change or the last background reload failed. Stable identity.
   const refreshIfStale = useCallback(() => {
-    if (inFlight.current !== null) return;
+    if (!enabledRef.current || inFlight.current !== null) return;
     const behind = itemsRevisionRef.current !== revisionRef.current;
     if (statusRef.current === 'error') {
       void loadRef.current('initial');
@@ -129,8 +163,10 @@ export function useListingFeed({ query, category }: { query: string; category: L
       const result = await list({
         ...(debounced ? { q: debounced } : {}),
         ...(category ? { category } : {}),
+        ...scopeQuery,
+        owner: 'others',
         page: page + 1,
-        pageSize: FEED_PAGE_SIZE,
+        pageSize,
       });
       if (ticket !== latest.current) return;
       // A listing may shift pages if others were added meanwhile.
@@ -145,7 +181,7 @@ export function useListingFeed({ query, category }: { query: string; category: L
     } finally {
       setLoadingMore(false);
     }
-  }, [hasMore, loadingMore, status, list, debounced, category, page]);
+  }, [hasMore, loadingMore, status, list, debounced, category, scopeQuery, pageSize, page]);
 
   return {
     items,
@@ -165,4 +201,11 @@ export function useListingFeed({ query, category }: { query: string; category: L
     refreshIfStale,
     loadMore,
   };
+}
+
+// Query parameters for a scope; nearby results come back nearest first.
+function toScopeQuery(scope: FeedScope): Pick<ListingQuery, 'lat' | 'lng' | 'radiusKm' | 'city'> {
+  if (!scope) return {};
+  if ('near' in scope) return { lat: scope.near.latitude, lng: scope.near.longitude, radiusKm: scope.near.radiusKm };
+  return { city: scope.city };
 }

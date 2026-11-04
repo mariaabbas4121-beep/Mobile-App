@@ -29,6 +29,7 @@ export interface RateLimitPolicy {
   // Listings. Uploads are counted separately: they are the costly writes.
   listingCreatePerUser: LimitRule;
   listingImageUploadPerUser: LimitRule;
+  listingLocationPerUser: LimitRule;
   // Borrow requests: creating one notifies a lender, so it is capped.
   borrowRequestCreatePerUser: LimitRule;
   // Chat messages, over REST and the socket together (see chat.service.ts).
@@ -53,6 +54,7 @@ export const DEFAULT_RATE_LIMITS: RateLimitPolicy = {
   phoneConfirmPerAccount: { windowMs: 15 * MINUTE, limit: 10 },
   listingCreatePerUser: { windowMs: 60 * MINUTE, limit: 20 },
   listingImageUploadPerUser: { windowMs: 60 * MINUTE, limit: 60 },
+  listingLocationPerUser: { windowMs: 60 * MINUTE, limit: 60 },
   borrowRequestCreatePerUser: { windowMs: 60 * MINUTE, limit: 20 },
   chatMessagePerUser: { windowMs: MINUTE, limit: 30 },
 };
@@ -161,6 +163,7 @@ export function createPhoneLimiters(policy: RateLimitPolicy = DEFAULT_RATE_LIMIT
 export interface ListingLimiters {
   createPerUser: RequestHandler;
   imageUploadPerUser: RequestHandler;
+  locationPerUser: RequestHandler;
 }
 
 // Mounted after requireAuth, so they count per signed-in user.
@@ -178,5 +181,6 @@ export function createListingLimiters(policy: RateLimitPolicy = DEFAULT_RATE_LIM
   return {
     createPerUser: createLimiter({ name: 'listing-create-user', rule: policy.listingCreatePerUser, key: 'user' }),
     imageUploadPerUser: createLimiter({ name: 'listing-image-user', rule: policy.listingImageUploadPerUser, key: 'user' }),
+    locationPerUser: createLimiter({ name: 'listing-location-user', rule: policy.listingLocationPerUser, key: 'user' }),
   };
 }

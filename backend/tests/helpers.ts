@@ -19,7 +19,7 @@ import type {
   PhoneVerificationStore,
 } from '../src/verification/phone.types.js';
 import { createPhoneVerificationService } from '../src/verification/phone-verification.service.js';
-import type { Caller, Listing, ListingImage, ListingRepository } from '../src/listings/listing.types.js';
+import type { Caller, Listing, ListingImage, ListingRepository, PickupLocation } from '../src/listings/listing.types.js';
 import type { BorrowRequest, BorrowRequestRepository, BorrowStatus } from '../src/borrow/borrow.types.js';
 import { inclusiveDays, rangesOverlap } from '../src/borrow/dates.js';
 import type { ChatMessage, ChatRepository, Conversation } from '../src/chat/chat.types.js';
@@ -243,6 +243,21 @@ export function memoryPhoneStore(now: () => number = Date.now) {
 }
 
 // --- Listing fakes -----------------------------------------------------------
+export const haversineKm = (a: { latitude: number; longitude: number }, b: { latitude: number; longitude: number }) => {
+  const r = (d: number) => (d * Math.PI) / 180;
+  const h =
+    Math.sin(r(b.latitude - a.latitude) / 2) ** 2 +
+    Math.cos(r(a.latitude)) * Math.cos(r(b.latitude)) * Math.sin(r(b.longitude - a.longitude) / 2) ** 2;
+  return 2 * 6371.0088 * Math.asin(Math.min(1, Math.sqrt(h)));
+};
+
+// The fake's public point: 300 m north of the precise one, rounded to 3
+// decimals (the database uses a secret random direction instead).
+export const fakePublicPoint = (p: { latitude: number; longitude: number }) => ({
+  latitude: Math.round((p.latitude + 0.3 / 111.32) * 1000) / 1000,
+  longitude: Math.round(p.longitude * 1000) / 1000,
+});
+
 // In-memory stand-in for the listing repository with the database's access
 // rules: archived listings are visible only to their owner, and writes by
 // anyone but the owner match nothing (as Row-Level Security would).
@@ -256,8 +271,10 @@ export function memoryListings() {
     return l && l.owner.id === caller.userId && !l.archivedAt ? l : null;
   };
 
+  const locations = new Map<string, PickupLocation>();
   const repo = {
     rows,
+    locations,
     search: vi.fn<ListingRepository['search']>(async (caller, s) => {
       const words = (s.q ?? '').toLowerCase().split(/\s+/).filter(Boolean);
       let list = [...rows.values()].filter(
@@ -267,10 +284,22 @@ export function memoryListings() {
           (!s.condition || l.condition === s.condition) &&
           (!s.availability || l.availability === s.availability) &&
           (!s.ownerId || l.owner.id === s.ownerId) &&
-          words.every((w) => `${l.title} ${l.description} ${l.tags.join(' ')}`.toLowerCase().includes(w)),
+          (!s.excludeOwnerId || l.owner.id !== s.excludeOwnerId) &&
+          words.every((w) => `${l.title} ${l.description} ${l.tags.join(' ')}`.toLowerCase().includes(w)) &&
+          (!s.city || (l.city ?? '').toLowerCase() === s.city.trim().toLowerCase()),
       );
+      const near = s.near;
+      if (near) {
+        list = list
+          .filter((l) => l.approximateLocation && haversineKm(near, l.approximateLocation) <= near.radiusKm)
+          .map((l) => ({ ...l, distanceKm: Math.round(haversineKm(near, l.approximateLocation!) * 10) / 10 }));
+      } else {
+        list = list.map((l) => ({ ...l, distanceKm: null }));
+      }
       list =
-        s.sort === 'title'
+        s.sort === 'distance'
+          ? list.sort((a, b) => (a.distanceKm ?? 0) - (b.distanceKm ?? 0))
+          : s.sort === 'title'
           ? list.sort((a, b) => a.title.localeCompare(b.title))
           : s.sort === 'oldest'
             ? list
@@ -280,7 +309,7 @@ export function memoryListings() {
     }),
     get: vi.fn<ListingRepository['get']>(async (caller, listingId) => {
       const l = rows.get(listingId);
-      return l && visible(caller, l) ? structuredClone(l) : null;
+      return l && visible(caller, l) ? { ...structuredClone(l), distanceKm: null } : null;
     }),
     create: vi.fn<ListingRepository['create']>(async (caller, input) => {
       const now = new Date().toISOString();
@@ -294,6 +323,9 @@ export function memoryListings() {
         replacementValuePkr: input.replacementValuePkr ?? null,
         borrowingTerms: input.borrowingTerms ?? null,
         area: input.area ?? null,
+        city: input.city ?? null,
+        approximateLocation: null,
+        distanceKm: null,
         availability: input.availability,
         teachMeEnabled: input.teachMeEnabled,
         tags: input.tags,
@@ -337,6 +369,24 @@ export function memoryListings() {
       const before = l.images.length;
       l.images = l.images.filter((i) => i.id !== imageId);
       return l.images.length < before;
+    }),
+    getLocation: vi.fn<ListingRepository['getLocation']>(async (caller, listingId) => {
+      const l = rows.get(listingId);
+      return l && l.owner.id === caller.userId ? (locations.get(listingId) ?? null) : null;
+    }),
+    setLocation: vi.fn<ListingRepository['setLocation']>(async (caller, listingId, point) => {
+      const l = owned(caller, listingId);
+      if (!l) throw AppError.notFound('Listing not found', 'LISTING_NOT_FOUND');
+      const location = { ...point, updatedAt: new Date().toISOString() };
+      locations.set(listingId, location);
+      l.approximateLocation = fakePublicPoint(point);
+      return location;
+    }),
+    clearLocation: vi.fn<ListingRepository['clearLocation']>(async (caller, listingId) => {
+      const l = owned(caller, listingId);
+      if (!l) throw AppError.notFound('Listing not found', 'LISTING_NOT_FOUND');
+      locations.delete(listingId);
+      l.approximateLocation = null;
     }),
   };
   return repo;

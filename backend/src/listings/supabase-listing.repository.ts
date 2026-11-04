@@ -12,6 +12,7 @@ import type {
   ListingImage,
   ListingRepository,
   ListingSearch,
+  PickupLocation,
 } from './listing.types.js';
 
 export const LISTING_IMAGES_BUCKET = 'listing-images';
@@ -27,6 +28,7 @@ const WRITABLE_COLUMNS: Record<keyof ListingChanges, string> = {
   replacementValuePkr: 'replacement_value_pkr',
   borrowingTerms: 'borrowing_terms',
   area: 'area',
+  city: 'city',
   availability: 'availability',
   teachMeEnabled: 'teach_me_enabled',
   tags: 'tags',
@@ -44,6 +46,10 @@ interface ListingRow {
   replacement_value_pkr: number | null;
   borrowing_terms: string | null;
   area: string | null;
+  city?: string | null;
+  public_latitude?: number | null;
+  public_longitude?: number | null;
+  distance_km?: number | string | null;
   availability: Listing['availability'];
   teach_me_enabled: boolean;
   tags: string[];
@@ -72,6 +78,12 @@ const toListing = (r: ListingRow, images: ListingImage[]): Listing => ({
   replacementValuePkr: r.replacement_value_pkr,
   borrowingTerms: r.borrowing_terms,
   area: r.area,
+  // `?? null` / `!= null`: rows from a database without the Phase 3A
+  // migration have no such keys at all.
+  city: r.city ?? null,
+  approximateLocation:
+    r.public_latitude != null && r.public_longitude != null ? { latitude: r.public_latitude, longitude: r.public_longitude } : null,
+  distanceKm: r.distance_km != null ? Number(r.distance_km) : null,
   availability: r.availability,
   teachMeEnabled: r.teach_me_enabled,
   tags: r.tags,
@@ -147,6 +159,9 @@ export function createSupabaseListingRepository(clients: SupabaseClients, logger
 
   const writeError = (operation: string, error: { code?: string }) => {
     if (error.code === '42501') return AppError.forbidden();
+    // Raised by set_listing_location / clear_listing_location.
+    if (error.code === 'NSL01') return AppError.notFound('Listing not found', 'LISTING_NOT_FOUND');
+    if (error.code === '22023') return AppError.badRequest('INVALID_LOCATION', 'Those coordinates are not valid');
     if (error.code === '23514') return AppError.badRequest('INVALID_LISTING', 'Listing values are not accepted');
     return fail(operation, error);
   };
@@ -163,6 +178,11 @@ export function createSupabaseListingRepository(clients: SupabaseClients, logger
         p_sort: s.sort,
         p_limit: s.pageSize,
         p_offset: (s.page - 1) * s.pageSize,
+        // Sent only when used, so the call shape matches older callers.
+        ...(s.near ? { p_latitude: s.near.latitude, p_longitude: s.near.longitude, p_radius_km: s.near.radiusKm } : {}),
+        ...(s.city ? { p_city: s.city } : {}),
+        // Needs 20261105120000_browse_exclude_owner.sql.
+        ...(s.excludeOwnerId ? { p_exclude_owner_id: s.excludeOwnerId } : {}),
       });
     },
 
@@ -272,7 +292,44 @@ export function createSupabaseListingRepository(clients: SupabaseClients, logger
       if (removeError) logger.warn({ operation: 'remove_listing_image_file' }, 'listing image file was not deleted');
       return true;
     },
+
+    async getLocation(caller, listingId) {
+      // Row-Level Security returns the row to its owner only.
+      const { data, error } = await db(
+        'get_listing_location',
+        clientFor(caller)
+          .from('listing_locations')
+          .select('latitude, longitude, updated_at')
+          .eq('listing_id', listingId)
+          .maybeSingle<{ latitude: number; longitude: number; updated_at: string }>(),
+      );
+      if (error) throw fail('get_listing_location', error);
+      return data ? { latitude: data.latitude, longitude: data.longitude, updatedAt: data.updated_at } : null;
+    },
+
+    async setLocation(caller, listingId, point): Promise<PickupLocation> {
+      const { data, error } = await db(
+        'set_listing_location',
+        clientFor(caller).rpc('set_listing_location', {
+          p_listing_id: listingId,
+          p_latitude: point.latitude,
+          p_longitude: point.longitude,
+        }),
+      );
+      if (error) throw writeError('set_listing_location', error);
+      const r = data as { latitude: number; longitude: number; updated_at: string };
+      return { latitude: r.latitude, longitude: r.longitude, updatedAt: r.updated_at };
+    },
+
+    async clearLocation(caller, listingId) {
+      const { error } = await db(
+        'clear_listing_location',
+        clientFor(caller).rpc('clear_listing_location', { p_listing_id: listingId }),
+      );
+      if (error) throw writeError('clear_listing_location', error);
+    },
   };
+
 
   return repository;
 }
@@ -282,5 +339,16 @@ export function unconfiguredListings(): ListingRepository {
   const refuse = async (): Promise<never> => {
     throw AppError.unavailable('Listings are not configured on the server', 'SERVER_NOT_CONFIGURED');
   };
-  return { search: refuse, get: refuse, create: refuse, update: refuse, archive: refuse, addImage: refuse, removeImage: refuse };
+  return {
+    search: refuse,
+    get: refuse,
+    create: refuse,
+    update: refuse,
+    archive: refuse,
+    addImage: refuse,
+    removeImage: refuse,
+    getLocation: refuse,
+    setLocation: refuse,
+    clearLocation: refuse,
+  };
 }

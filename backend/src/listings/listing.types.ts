@@ -5,7 +5,8 @@
 export const LISTING_CATEGORIES = ['tools', 'electronics', 'home', 'outdoor', 'kitchen', 'sports', 'books', 'other'] as const;
 export const LISTING_CONDITIONS = ['excellent', 'good', 'fair'] as const;
 export const LISTING_AVAILABILITY = ['available', 'unavailable'] as const;
-export const LISTING_SORTS = ['newest', 'oldest', 'title'] as const;
+// 'distance' needs a nearby search (lat, lng).
+export const LISTING_SORTS = ['newest', 'oldest', 'title', 'distance'] as const;
 
 export type ListingCategory = (typeof LISTING_CATEGORIES)[number];
 export type ListingCondition = (typeof LISTING_CONDITIONS)[number];
@@ -30,6 +31,14 @@ export interface Listing {
   replacementValuePkr: number | null;
   borrowingTerms: string | null;
   area: string | null;
+  city: string | null;
+  // The public pickup point: the owner's chosen point moved 200-400 m in a
+  // secret direction and rounded. Null when the owner has not set one. The
+  // precise point is never part of a listing.
+  approximateLocation: { latitude: number; longitude: number } | null;
+  // From the search origin to approximateLocation, to 0.1 km. Only in
+  // nearby searches.
+  distanceKm: number | null;
   availability: ListingAvailability;
   teachMeEnabled: boolean;
   tags: string[];
@@ -37,6 +46,13 @@ export interface Listing {
   createdAt: string;
   updatedAt: string;
   images: ListingImage[];
+}
+
+// The precise pickup point, for its owner only.
+export interface PickupLocation {
+  latitude: number;
+  longitude: number;
+  updatedAt: string;
 }
 
 export interface ListingInput {
@@ -47,6 +63,7 @@ export interface ListingInput {
   replacementValuePkr?: number | null | undefined;
   borrowingTerms?: string | null | undefined;
   area?: string | null | undefined;
+  city?: string | null | undefined;
   availability: ListingAvailability;
   teachMeEnabled: boolean;
   tags: string[];
@@ -61,7 +78,14 @@ export interface ListingSearch {
   availability?: ListingAvailability | undefined;
   // Set only from the verified caller ("owner=me"), never from input.
   ownerId?: string | undefined;
+  // Leave this owner's listings out ("owner=others"). Also only ever the
+  // verified caller.
+  excludeOwnerId?: string | undefined;
   includeArchived: boolean;
+  // Nearby: only listings whose public point is within radiusKm.
+  near?: { latitude: number; longitude: number; radiusKm: number } | undefined;
+  // City-wide, case-insensitive.
+  city?: string | undefined;
   sort: ListingSort;
   page: number;
   pageSize: number;
@@ -89,4 +113,8 @@ export interface ListingRepository {
   addImage(caller: Caller, listingId: string, file: { data: Buffer; contentType: ImageContentType }): Promise<ListingImage>;
   // False when there is no such image on the listing.
   removeImage(caller: Caller, listingId: string, imageId: string): Promise<boolean>;
+  // The owner's precise pickup point; null when unset or not the owner.
+  getLocation(caller: Caller, listingId: string): Promise<PickupLocation | null>;
+  setLocation(caller: Caller, listingId: string, point: { latitude: number; longitude: number }): Promise<PickupLocation>;
+  clearLocation(caller: Caller, listingId: string): Promise<void>;
 }

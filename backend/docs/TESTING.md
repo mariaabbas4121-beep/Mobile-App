@@ -35,6 +35,7 @@ They need no `.env`, network or Supabase project.
 | `phone-verification.test.ts` | Phone routes and service against an in-memory model of Supabase's phone-change flow: number parsing, auth and account status, start/resend/confirm success, provider disabled or misconfigured, SMS failure, numbers owned by other accounts, wrong/expired/repeated codes, other users' numbers, independent post-verification check, recovery after a lost database write, number changes, reconciliation, cooldown and double taps, per-IP/account/number limits, logs without codes |
 | `listings.routes.test.ts` | Listing endpoints with an in-memory repository: create/read/update/archive contract, rejecting client-supplied owners and unknown fields, validation of every field and query parameter, pagination, search and filters, owner-only edits and archives (403), unknown and malformed ids (404/400), account-status rules, archived listings, photo type/content/size checks (415/413), the 5-photo limit, photo ownership, rate limit |
 | `borrow-requests.routes.test.ts` | Borrow-request endpoints with in-memory repositories: create (dates in Pakistan time, inclusive, same-day, 30-day and 90-day limits, bad formats), auth and account status, own/archived/unavailable listings, client-supplied ids rejected, overlap with accepted requests, duplicate pending, accept/decline/cancel by the right side only, outsiders get 404, every invalid transition, losing an accept race gives 409, lists and filters, booked dates, rate limit |
+| `listing-locations.routes.test.ts` | Nearby search through the API: 3 km default, nearest first, rounded distances, wider radii, a distant city never included, listings without a spot excluded from nearby but in city and default browsing, filters and pagination, explicit sort; every invalid lat/lng/radius/city/sort combination refused, empty `lat` treated as absent, unchanged default search; pickup spot set by the owner only, precise values never in public responses, clearing, archived refused, editing never moves it, rate limit |
 | `chat.routes.test.ts` | Chat REST endpoints with in-memory repositories: get-or-create is idempotent for both sides, pending/declined/cancelled refused, outsiders get 404 everywhere, participant ids rejected, list with last message and unread count, mark read, cursor pagination and bad cursors, send validation and sanitising, retry with the same clientId stored and published once, clientId reuse, account status, archived listing, rate limit |
 | `chat.socket.test.ts` | The Socket.IO server on a real localhost HTTP server with real `socket.io-client` connections: no token, bad token, valid token, disconnect on token expiry; join only for participants (room membership checked); messages stored before broadcast and delivered only to room members; content-free hints to participants outside the room; retries delivered once; validation and client-supplied sender ids; outsiders, non-accepted requests and suspended accounts refused; `message:error` without an ack; REST sends reach sockets; leaving a room |
 | `supabase-phone-auth.test.ts` | The Supabase adapter with fake HTTP and SDK: request shape (caller's token), error mapping, settings caching, revoking the session `verifyOtp` issues |
@@ -50,6 +51,8 @@ They cover signup provisioning, retries and bad metadata, email confirmation, ve
 `listings.test.ts` covers the listings migration: only active users create, only for themselves; others' updates match nothing; ownership cannot move; archiving is server-stamped and final; no deletes; suspended owners vanish from discovery; anonymous reads expose only listing columns; `search_listings` word search (wildcards literal), filters, paging with a stable total, sorting and the page-size cap; photo rows tied to the owner's own listing and folder, not on archived listings, at most 5; and the Storage bucket's privacy, limits and upload/read/delete policies (on a minimal `storage` schema stand-in).
 
 `borrow-requests.test.ts` covers the borrow-request migration: lender filled from the listing and not choosable, borrower identity enforced, anonymous access refused, own/archived/unavailable/suspended-owner listings refused, the date window and limits, one pending per borrower, every allowed and forbidden transition and actor, immutable request details, account-status rules, auto-decline on archive, no deletes, and the exclusion constraint (touching inclusive ranges conflict, the next day does not, the service role and a single multi-row update cannot bypass it, declined/cancelled reserve nothing), plus both read helpers. PGlite has one connection, so two transactions cannot truly race here; the guarantee under real concurrency is PostgreSQL's exclusion constraint, which these tests show is in place and enforced.
+
+`listing-locations.test.ts` covers the location migration: precise spot readable only by its owner, offsets readable by nobody; the public point 150–460 m from the precise one and rounded; stable across re-saves and shared by an owner's listings; no direct writes; owner/active/unarchived rules and coordinate validation; clearing; nearby search (radius, nearest first, rounding matching an independent haversine, wider radii, the 50 km cap, distant cities, listings without a spot, filters, pagination, invalid coordinates, archived and suspended owners, the ±180° wrap); city search; and the city backfill of listings created before the migration.
 
 `chat.test.ts` covers the chat migration: accepting creates the conversation with the request's participants; no conversation for pending, declined or cancelled requests; `open_conversation` idempotent and on demand; outsiders get null; no direct writes to conversations and no access to internal helpers; only participants read conversations and messages; anonymous gets nothing; the conversation list (other participant, last message, unread count, ordering); mark read; cursor pagination with no gaps or repeats; send validation (empty, blank, over 2000); idempotent client ids and refusing a reused id; no impersonation, no chosen ids or timestamps, no edits or deletes; suspended refused and restricted allowed; refused once the request is no longer accepted; archived listings keep chat open.
 
@@ -167,6 +170,30 @@ Timings over the LAN address with a throwaway user (warm, cold in brackets): hea
 | Frontend tests (`npx jest`) | 239 / 239 passed (22 new: date rules, request form, item screen, requests screen) |
 | Hosted Supabase | **Migration not applied**; nothing about borrow requests was run against the hosted project |
 | Concurrent accepts on a real server | **Not run** (PGlite has one connection; the exclusion constraint is the guarantee) |
+
+### Discovery and activity polish, Phase 3A.1 (2026-11-04)
+
+| Check | Result |
+| --- | --- |
+| Backend type check, build | Clean |
+| `npm test` (unit + database) | 557 / 557 passed (4 new database tests in `browse-exclude-owner.test.ts`: exclusion in plain/word/nearby/city search with matching totals, paging, others still see the owner's items, anonymous use; 12 new route tests in `browse-and-activity.routes.test.ts`: `owner=others` in every kind of search, exclusion taken from the token, `owner=me` unchanged; `/activity` needs a token, is empty for a new user, covers requests/decisions/messages/listings from each side newest first, never includes another user's records, records archiving but not edits, reports an unavailable source, validates `limit`). The database project's `hookTimeout` was raised from 60 s to 180 s: with eight files migrating PGlite alongside the unit tests, set-up timed out under load (the database tests alone passed in 39 s) |
+| Frontend type check | Clean |
+| Frontend tests (`npx jest`) | 298 / 298 passed (15 new: GPS off with the Android dialog, left off, and iOS Settings; return from Settings re-checks without prompting, and no re-check otherwise; a double tap never stacks prompts; map labels, nearest item previewed without a tap, marker selection, shared-point grouping and stepping; activity wording, data, navigation, empty, error and partial states; My Listings). Feed tests now expect `owner=others` and the "listed; see My Listings" note |
+| Android bundle (`expo export --platform android`) | Built |
+| Hosted Supabase | **Not tested.** `20261105120000_browse_exclude_owner.sql` is not applied |
+| Real devices | **Not tested**, including the permission and GPS dialogs |
+
+### Nearby discovery, Phase 3A (2026-11-04)
+
+| Check | Result |
+| --- | --- |
+| Backend type check, build | Clean |
+| `npm test` (unit + database) | 541 / 541 passed, twice in a row (501 earlier + 16 location database + 24 location route tests). The server-process test's start-up wait was raised from 15 s to 30 s: it had timed out under load, never alone |
+| Frontend type check | Clean |
+| Frontend tests (`npx jest`) | 283 / 283 passed (19 new: permission explained first and never requested automatically, granted/denied/blocked/unavailable/timeout, radius chips and expansion, manual neighbourhood, city-wide and all areas, GPS movement threshold, foreground-only watching, map fallback/markers/preview/expansion, pickup spot set/denied/kept/removed in the lend form) |
+| Android bundle (`expo export --platform android`) | Built (includes `react-native-maps` and `expo-location`) |
+| Hosted Supabase | **Not tested.** The migration is not applied |
+| Real devices | **Not tested** |
 
 ### Chat, Phase 2C (2026-11-02)
 

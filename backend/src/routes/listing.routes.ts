@@ -15,6 +15,7 @@ import {
   listingQuery,
   listingUpdateBody,
   parseOrThrow,
+  pickupLocationBody,
   sniffImageType,
   type ListingCreateBody,
   type ListingUpdateBody,
@@ -69,8 +70,12 @@ export function listingRoutes({ gateway, profiles, listings, limiters }: Listing
       condition: query.condition,
       availability: query.availability,
       ownerId: query.owner === 'me' ? me?.userId : undefined,
+      // From the verified token only; the client merely asks for "others".
+      excludeOwnerId: query.owner === 'others' ? me?.userId : undefined,
       // Archived listings only ever come back for the owner's own list.
       includeArchived: query.owner === 'me' && query.includeArchived,
+      near: query.near,
+      city: query.city,
       sort: query.sort,
       page: query.page,
       pageSize: query.pageSize,
@@ -80,6 +85,12 @@ export function listingRoutes({ gateway, profiles, listings, limiters }: Listing
       data: {
         items,
         pagination: { page: query.page, pageSize: query.pageSize, total, totalPages: Math.ceil(total / query.pageSize) },
+        // Which kind of discovery these results are, so clients can label it.
+        scope: query.near
+          ? { mode: 'nearby', radiusKm: query.near.radiusKm }
+          : query.city
+            ? { mode: 'city', city: query.city }
+            : { mode: 'all' },
       },
     });
   });
@@ -151,6 +162,34 @@ export function listingRoutes({ gateway, profiles, listings, limiters }: Listing
       res.status(201).json({ success: true, data: { image } });
     },
   );
+
+  // The precise pickup point, for the owner only (to edit it). Everyone else
+  // sees only listing.approximateLocation.
+  router.get('/:id/location', authenticated, async (req, res) => {
+    const { id } = parseOrThrow(listingParams, req.params);
+    const me = caller(req);
+    await ownedListing(listings, me, id);
+    res.status(200).json({ success: true, data: { location: await listings.getLocation(me, id) } });
+  });
+
+  // Sets where the item can be collected. Never set automatically: moving
+  // around does not move a listing.
+  router.put('/:id/location', authenticated, active, limiters.locationPerUser, validateBody(pickupLocationBody), async (req, res) => {
+    const { id } = parseOrThrow(listingParams, req.params);
+    const me = caller(req);
+    refuseArchived(await ownedListing(listings, me, id));
+    const location = await listings.setLocation(me, id, req.body as { latitude: number; longitude: number });
+    const listing = await listings.get(me, id);
+    res.status(200).json({ success: true, data: { location, listing } });
+  });
+
+  router.delete('/:id/location', authenticated, inGoodStanding, async (req, res) => {
+    const { id } = parseOrThrow(listingParams, req.params);
+    const me = caller(req);
+    refuseArchived(await ownedListing(listings, me, id));
+    await listings.clearLocation(me, id);
+    res.status(204).end();
+  });
 
   router.delete('/:id/images/:imageId', authenticated, inGoodStanding, async (req, res) => {
     const { id, imageId } = parseOrThrow(listingImageParams, req.params);

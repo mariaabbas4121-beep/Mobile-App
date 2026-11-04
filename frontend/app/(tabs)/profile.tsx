@@ -199,7 +199,9 @@ export default function ProfileScreen() {
                     ? confirmSignOut
                     : item.label === 'Verification Status'
                       ? openPhoneVerification
-                      : undefined
+                      : item.label === 'My Listed Items'
+                        ? () => router.push('/listings/mine')
+                        : undefined
                 }
                 accessibilityRole="button"
                 accessibilityLabel={item.label}

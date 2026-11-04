@@ -9,7 +9,9 @@ Supabase Auth (`auth.users`) owns identity and credentials. Passwords, tokens an
 | `profiles` | One row per user: display name, city, neighborhood, bio, avatar path, verified and pending phone, account status, profile-completed timestamp | Signup trigger; the user (four columns only); the server |
 | `user_verifications` | One current row per user per type (`email`, `phone`, `identity`) with status, provider, opaque provider reference, timestamps | Triggers and the server only |
 | `audit_events` | Append-only log of security events with small, non-sensitive metadata | Triggers and the server only |
-| `listings` | Items offered for lending: title, description, category, condition, optional value/terms/area, availability, Teach Me flag, tags, `archived_at` | The owner (with their own token) |
+| `listings` | Items offered for lending: title, description, category, condition, optional value/terms/area/city, availability, Teach Me flag, tags, `archived_at`, and the approximate public pickup point (`public_latitude`, `public_longitude`; written only by the database) | The owner (with their own token); the public point only via `set_listing_location()` |
+| `listing_locations` | The precise pickup spot of a listing | Owner only, through `set_listing_location()` / `clear_listing_location()`; readable by the owner only |
+| `location_privacy_offsets` | One secret displacement (bearing, 200–400 m) per owner, used to derive public points | Nobody: RLS on, no policies, no grants to API roles |
 | `borrow_requests` | Requests to borrow a listing for inclusive dates: listing, lender (= listing owner), borrower, dates, optional message, status, decision/cancel times | The borrower (create, cancel) and lender (accept, decline), each with their own token |
 | `conversations` | One private chat per accepted borrow request: request, listing, borrower, lender (copied from the request), each side's last-read time, last message time | Created by the accept trigger or `open_conversation()`; never written by users |
 | `messages` | Text messages: conversation, sender, client id (idempotency key), body (1–2000 characters, not blank), time | Participants, each with their own token; immutable |
@@ -63,6 +65,21 @@ Audit events: `verification.phone_code_requested`, `verification.phone_code_rese
 | `on_auth_user_email_confirmed` | When Supabase confirms the email: marks the email verification `verified` with Supabase's timestamp. |
 
 All functions run with an empty `search_path` and fully qualified names, and cannot be called through the Data API.
+
+### Pickup locations and nearby search (Phase 3A)
+
+- The precise spot lives in `listing_locations`. The `listings` table is readable through the public API key, so the precise spot is deliberately kept off it.
+- `set_listing_location(listing, lat, lng)` (SECURITY DEFINER) checks that the caller owns the unarchived listing and is `active`. It then stores the spot and writes the public point: the spot moved by the owner's secret offset (created at random on first use, never changed), rounded to 3 decimals. `clear_listing_location(listing)` removes both.
+- One offset per owner, not per listing, so averaging several listings from the same home does not converge on it, and re-saving the same spot gives the same public point.
+- `search_listings(...)` gained `p_latitude`, `p_longitude`, `p_radius_km` (clamped to 0.1–50) and `p_city`. Nearby filtering uses a latitude/longitude bounding box (served by `listings_public_point_idx`), then the haversine distance (`distance_km()`) on the **public** point, so results and distances reveal nothing beyond what is already public. Invalid or incomplete coordinates match nothing. The longitude box is skipped where it would wrap ±180°.
+- **No PostGIS.** The B-tree bounding box plus haversine is accurate to well under 1% at these distances, needs no extension, and runs on the local PGlite tests. PostGIS can replace it later without changing the API.
+- The migration backfills `listings.city` from each owner's profile city (triggers paused, so `updated_at` is untouched).
+
+| Role | `listing_locations` | `location_privacy_offsets` |
+| --- | --- | --- |
+| `anon` | none | none |
+| `authenticated` | read own (`listing_id, latitude, longitude, updated_at`); writes only through the functions | none |
+| `service_role` | full | full |
 
 ### Listings
 
@@ -149,6 +166,8 @@ Migrations live in `supabase/migrations/` and are applied with the Supabase CLI 
 | --- | --- |
 | `20261020120000_auth_foundation.sql` | Types, tables, triggers, RLS, grants |
 | `20261020130000_tighten_service_role_grants.sql` | Makes `audit_events` append-only for `service_role` too; blocks `TRUNCATE` |
+| `20261105120000_browse_exclude_owner.sql` | Replaces `search_listings` with one more optional parameter, `p_exclude_owner_id`, for `owner=others` (Browse leaves out the caller's own listings). Function only: no table, column, policy or data change. **Not applied to the dev project.** Until it is, signed-in browsing (`owner=others`, which the app sends from Phase 3A.1) answers `503 DATABASE_UNAVAILABLE`; `owner=me`, item pages and anonymous browsing keep working |
+| `20261104120000_listing_locations.sql` | Pickup spots (private), per-owner privacy offsets, public approximate points and city on listings, nearby and city search in `search_listings`, city backfill. Applied to the dev project (reported by the user, 2026-11-04; not re-checked by Claude) |
 | `20261103120000_chat.sql` | Conversations and messages, the accept trigger, chat functions, RLS. Needs `20261102120000_borrow_requests.sql` first. **Not applied to the dev project.** Until it is, chat endpoints answer `503 DATABASE_UNAVAILABLE` |
 | `20261102120000_borrow_requests.sql` | Borrow requests, lifecycle triggers, the no-overlap exclusion constraint (`btree_gist`), RLS and read helpers. **Not applied to the dev project** (checked 2026-11-02: `borrow_requests` returns `PGRST205`). Until it is, borrow endpoints answer `503 DATABASE_UNAVAILABLE` |
 | `20261028120000_listings.sql` | Listings, listing photos, `search_listings`, RLS, the private `listing-images` bucket and its Storage policies. **Not yet applied to the dev project** (checked 2026-10-28: `listings` returns `PGRST205`, the bucket `NoSuchBucket`). Until it is, listing reads answer `503 DATABASE_UNAVAILABLE` and photo uploads `503 STORAGE_NOT_CONFIGURED` |
@@ -183,6 +202,16 @@ Always read the dry run first and confirm the linked project is the intended one
 - [ ] **Authentication → Rate Limits:** review the email-send limit (raise it on the dev project so the signup tests can run).
 - [ ] Revoke the personal access token when not running migrations, and clear `SUPABASE_DB_PASSWORD` from `.env`.
 - [ ] Use a separate Supabase project for production; never set `INTEGRATION_PROJECT_REF` there.
+
+### Browse without your own listings (Phase 3A.1)
+
+- [ ] Apply `20261105120000_browse_exclude_owner.sql`: `npm.cmd run db:push:dry`, check that only this file is pending, then `npm.cmd run db:push`. It only replaces `search_listings` and is safe to apply while the app is in use: calls without the new parameter behave exactly as before.
+- [ ] No extension, environment variable or dashboard setting is needed. `GET /api/v1/activity` needs no migration (it reads existing tables).
+
+### Nearby discovery (Phase 3A)
+
+- [ ] Apply `20261104120000_listing_locations.sql` after the borrow-request and chat migrations: `npm.cmd run db:push:dry`, check the order, then `npm.cmd run db:push`. It replaces `search_listings`; the previous app build keeps working because the new parameters are optional.
+- [ ] No extension, environment variable or dashboard setting is needed.
 
 ### Chat (Phase 2C)
 

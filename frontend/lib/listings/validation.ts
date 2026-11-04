@@ -9,6 +9,7 @@ export interface ListingForm {
   replacementValue: string;
   borrowingTerms: string;
   area: string;
+  city: string;
   tags: string;
   teachMeEnabled: boolean;
 }
@@ -23,6 +24,7 @@ export function validateListingForm(form: ListingForm): { errors: ListingFormErr
   const title = form.title.trim();
   const description = form.description.trim();
   const area = form.area.trim();
+  const city = form.city.trim();
   const terms = form.borrowingTerms.trim();
   const tags = form.tags
     .split(',')
@@ -47,6 +49,7 @@ export function validateListingForm(form: ListingForm): { errors: ListingFormErr
 
   if (terms.length > 1000) errors.borrowingTerms = 'Keep the borrowing terms under 1000 characters.';
   if (area && (area.length < 2 || area.length > 80)) errors.area = 'Enter an area between 2 and 80 characters.';
+  if (city && (city.length < 2 || city.length > 80)) errors.city = 'Enter a city between 2 and 80 characters.';
 
   if (tags.length > 5) errors.tags = 'Use at most 5 tags.';
   else if (tags.some((t) => t.length > 24)) errors.tags = 'Keep each tag under 24 characters.';
@@ -62,6 +65,7 @@ export function validateListingForm(form: ListingForm): { errors: ListingFormErr
       replacementValuePkr,
       borrowingTerms: terms || null,
       area: area || null,
+      city: city || null,
       teachMeEnabled: form.teachMeEnabled,
       tags,
     },
@@ -77,6 +81,7 @@ const SERVER_FIELDS: Record<string, ListingFormField> = {
   replacementValuePkr: 'replacementValue',
   borrowingTerms: 'borrowingTerms',
   area: 'area',
+  city: 'city',
   tags: 'tags',
   teachMeEnabled: 'teachMeEnabled',
 };

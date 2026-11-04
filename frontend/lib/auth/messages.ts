@@ -98,6 +98,8 @@ export function errorMessage(err: unknown): string {
       return 'Those dates cannot be requested. Choose dates from today onwards.';
     case 'BORROW_REQUEST_NOT_FOUND':
       return 'This request no longer exists.';
+    case 'INVALID_LOCATION':
+      return 'That location could not be used. Choose it again.';
     case 'CONVERSATION_NOT_FOUND':
       return 'This conversation is not available.';
     case 'CHAT_NOT_AVAILABLE':

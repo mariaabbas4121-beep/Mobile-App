@@ -228,9 +228,12 @@ describe('discovery', () => {
     await seedListing(u);
     expect(await sqlState(asRole(db, 'anon', null, (tx) => tx.query(`select * from public.profiles`)))).toBe(INSUFFICIENT_PRIVILEGE);
     const r = await search('anon', null, { p_owner_id: u });
+    // city, the approximate public point and distance_km were added in
+    // Phase 3A; the precise pickup point is never part of the result.
     expect(Object.keys(r.items[0]!).sort()).toEqual([
-      'archived_at', 'area', 'availability', 'borrowing_terms', 'category', 'condition', 'created_at', 'description',
-      'id', 'owner_display_name', 'owner_id', 'replacement_value_pkr', 'tags', 'teach_me_enabled', 'title', 'updated_at',
+      'archived_at', 'area', 'availability', 'borrowing_terms', 'category', 'city', 'condition', 'created_at', 'description',
+      'distance_km', 'id', 'owner_display_name', 'owner_id', 'public_latitude', 'public_longitude', 'replacement_value_pkr',
+      'tags', 'teach_me_enabled', 'title', 'updated_at',
     ]);
   });
 

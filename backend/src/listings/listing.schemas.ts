@@ -31,6 +31,7 @@ const fields = {
   replacementValuePkr: z.number().int().min(0).max(10_000_000).nullable().optional(),
   borrowingTerms: optionalText(1, 1000),
   area: optionalText(2, 80),
+  city: optionalText(2, 80),
   availability: z.enum(LISTING_AVAILABILITY),
   teachMeEnabled: z.boolean(),
   tags,
@@ -56,23 +57,78 @@ export const listingUpdateBody = z
 export type ListingCreateBody = z.infer<typeof listingCreateBody>;
 export type ListingUpdateBody = z.infer<typeof listingUpdateBody>;
 
-export const listingQuery = z.object({
+// Nearby search radius, in kilometres.
+export const MIN_RADIUS_KM = 0.5;
+export const MAX_RADIUS_KM = 50;
+export const DEFAULT_RADIUS_KM = 3;
+
+// An empty value ("lat=") is absent, not 0.
+const coordinate = (min: number, max: number) =>
+  z.preprocess(
+    (v) => (v === '' ? undefined : v),
+    z.coerce
+      .number({ error: 'must be a number' })
+      .refine(Number.isFinite, { error: 'must be a number' })
+      .min(min, { error: `must be between ${min} and ${max}` })
+      .max(max, { error: `must be between ${min} and ${max}` })
+      .optional(),
+  );
+
+export const listingQuery = z
+  .object({
   q: z.string().trim().max(100).optional().transform((v) => v || undefined),
   category: z.enum(LISTING_CATEGORIES).optional(),
   condition: z.enum(LISTING_CONDITIONS).optional(),
   availability: z.enum(LISTING_AVAILABILITY).optional(),
-  // The only owner filter: the caller's own listings.
-  owner: z.literal('me').optional(),
+  // The only owner filters: the caller's own listings ('me'), or everyone
+  // else's ('others', for browsing; anonymous callers have none to hide).
+  owner: z.enum(['me', 'others']).optional(),
   includeArchived: z
     .enum(['true', 'false'])
     .optional()
     .transform((v) => v === 'true'),
-  sort: z.enum(LISTING_SORTS).default('newest'),
+  // Nearby: lat and lng together; radiusKm defaults to 3.
+  lat: coordinate(-90, 90),
+  lng: coordinate(-180, 180),
+  radiusKm: z.coerce
+    .number({ error: 'must be a number' })
+    .min(MIN_RADIUS_KM, { error: `must be between ${MIN_RADIUS_KM} and ${MAX_RADIUS_KM}` })
+    .max(MAX_RADIUS_KM, { error: `must be between ${MIN_RADIUS_KM} and ${MAX_RADIUS_KM}` })
+    .optional(),
+  // City-wide browsing; not combined with lat/lng.
+  city: z.string().trim().min(2).max(80).optional(),
+  // Defaults to 'distance' for nearby searches, 'newest' otherwise.
+  sort: z.enum(LISTING_SORTS).optional(),
   page: z.coerce.number().int().min(1).max(1000).default(1),
   pageSize: z.coerce.number().int().min(1).max(50).default(20),
-});
+})
+  .superRefine((q, ctx) => {
+    const near = q.lat !== undefined || q.lng !== undefined;
+    if (near && (q.lat === undefined || q.lng === undefined)) {
+      ctx.addIssue({ code: 'custom', path: [q.lat === undefined ? 'lat' : 'lng'], message: 'lat and lng must be sent together' });
+    }
+    if (q.radiusKm !== undefined && !near) ctx.addIssue({ code: 'custom', path: ['radiusKm'], message: 'needs lat and lng' });
+    if (q.city !== undefined && near) ctx.addIssue({ code: 'custom', path: ['city'], message: 'use either city or lat/lng, not both' });
+    if (q.sort === 'distance' && !near) ctx.addIssue({ code: 'custom', path: ['sort'], message: 'distance sorting needs lat and lng' });
+  })
+  .transform((q) => ({
+    ...q,
+    near:
+      q.lat !== undefined && q.lng !== undefined
+        ? { latitude: q.lat, longitude: q.lng, radiusKm: q.radiusKm ?? DEFAULT_RADIUS_KM }
+        : undefined,
+    sort: q.sort ?? (q.lat !== undefined ? ('distance' as const) : ('newest' as const)),
+  }));
 
 export type ListingQuery = z.infer<typeof listingQuery>;
+
+// PUT /items/:id/location. Strict: nothing else is accepted.
+export const pickupLocationBody = z
+  .object({
+    latitude: z.number({ error: 'must be a number' }).min(-90).max(90),
+    longitude: z.number({ error: 'must be a number' }).min(-180).max(180),
+  })
+  .strict();
 
 const uuid = z.uuid({ error: 'must be a valid id' });
 

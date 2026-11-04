@@ -1,267 +1,399 @@
-import { useState } from 'react';
-import {
-  View, Text, StyleSheet, TouchableOpacity, Image,
-  Dimensions, ScrollView, Platform,
-} from 'react-native';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
+import MapView, { Circle, Marker } from 'react-native-maps';
 import { useApp } from '../../context/AppContext';
-import { Colors, Typography, Spacing, Radii, Shadows } from '../../utils/theme';
+import { useDiscovery } from '../../context/DiscoveryContext';
+import { AreaBar, AreaPicker, LocationCard, RadiusChips } from '../../components/discovery/DiscoveryControls';
+import type { Listing, ListingCategory } from '../../lib/api/types';
+import { errorMessage } from '../../lib/auth/messages';
+import { CATEGORY_OPTIONS, categoryLabel, conditionLabel } from '../../lib/listings/options';
+import { useListingFeed } from '../../lib/listings/useListingFeed';
+import { groupByPoint, spotLabel, type MapSpot } from '../../lib/listings/mapSpots';
+import { formatDistance, nextRadius, regionFor } from '../../lib/location/geo';
+import { cityNamed } from '../../lib/location/places';
+import { Colors, Radii, Shadows, Spacing, Typography } from '../../utils/theme';
 
-const { width, height } = Dimensions.get('window');
-const MAP_HEIGHT = height * 0.55;
+const GREEN = Colors.green || '#2e7d32';
+const DARK = Colors.greenDark || '#1b5e20';
+// One page of the nearest items; the list view pages further.
+const MAP_PAGE_SIZE = 50;
 
-// Simulated map pins with relative positions
-const PIN_POSITIONS = [
-  { id: 'i1', x: 0.35, y: 0.38 },
-  { id: 'i2', x: 0.62, y: 0.45 },
-  { id: 'i3', x: 0.25, y: 0.58 },
-  { id: 'i4', x: 0.65, y: 0.42 },
-  { id: 'i5', x: 0.15, y: 0.65 },
-  { id: 'i6', x: 0.42, y: 0.30 },
-  { id: 'i7', x: 0.28, y: 0.55 },
-  { id: 'i8', x: 0.22, y: 0.62 },
+const FILTERS: { id: 'all' | ListingCategory; label: string; icon: string }[] = [
+  { id: 'all', label: 'All', icon: '🏠' },
+  ...CATEGORY_OPTIONS.map((c) => ({ id: c.value, label: c.label, icon: c.icon })),
 ];
 
+const categoryIcon = (c: ListingCategory) => CATEGORY_OPTIONS.find((o) => o.value === c)?.icon ?? '📦';
+
+// A labelled pin: category icon and a short name (or "3 items" where several
+// listings share a point). The selected one is larger and dark.
+function SpotMarker({ spot, selected, onPress }: { spot: MapSpot; selected: boolean; onPress: () => void }) {
+  const first = spot.items[0]!;
+  const available = spot.items.some((i) => i.availability === 'available');
+  const label =
+    spot.items.length > 1
+      ? `${spot.items.length} items: ${spot.items.map((i) => i.title).join(', ')}`
+      : `${first.title}${first.distanceKm !== null ? `, ${formatDistance(first.distanceKm)}` : ''}`;
+  return (
+    <Marker
+      // Re-keyed on selection: with tracksViewChanges off, Android only
+      // redraws a custom marker when it is mounted again.
+      key={`${spot.key}:${selected ? 'on' : 'off'}`}
+      coordinate={spot.point}
+      anchor={{ x: 0.5, y: 1 }}
+      zIndex={selected ? 10 : 1}
+      tracksViewChanges={false}
+      onPress={(e) => {
+        e?.stopPropagation?.();
+        onPress();
+      }}
+      accessibilityLabel={label}
+    >
+      <View style={styles.pinWrap}>
+        <View style={[styles.pin, !available && styles.pinMuted, selected && styles.pinSelected]}>
+          <Text style={styles.pinIcon}>{spot.items.length > 1 ? '📍' : categoryIcon(first.category)}</Text>
+          <Text style={[styles.pinLabel, selected && styles.pinLabelSelected]} numberOfLines={1}>
+            {spotLabel(spot)}
+          </Text>
+        </View>
+        <View style={[styles.pinTail, !available && styles.pinTailMuted, selected && styles.pinTailSelected]} />
+      </View>
+    </Marker>
+  );
+}
+
+// Always shown while there are items: the selected one (the nearest until
+// the user picks another). Tapping it opens the listing; items sharing a
+// point can be stepped through.
+function Preview({
+  item,
+  position,
+  onOpen,
+  onStep,
+}: {
+  item: Listing;
+  position: { index: number; count: number } | null;
+  onOpen: () => void;
+  onStep: (by: 1 | -1) => void;
+}) {
+  const cover = item.images[0]?.url;
+  const place = [item.area, item.city].filter(Boolean).join(', ');
+  return (
+    <View style={styles.preview} accessibilityLabel={`Preview of ${item.title}`}>
+      <TouchableOpacity
+        style={styles.previewMain}
+        onPress={onOpen}
+        activeOpacity={0.85}
+        accessibilityRole="button"
+        accessibilityLabel={`View ${item.title}`}
+        accessibilityHint="Opens the listing"
+      >
+        {cover ? (
+          <Image source={{ uri: cover }} style={styles.previewImage} />
+        ) : (
+          <View style={[styles.previewImage, styles.previewPlaceholder]}>
+            <Text style={{ fontSize: 26 }}>{categoryIcon(item.category)}</Text>
+          </View>
+        )}
+        <View style={{ flex: 1 }}>
+          <Text style={styles.previewTitle} numberOfLines={2}>{item.title}</Text>
+          <Text style={styles.previewMeta} numberOfLines={1}>
+            {categoryLabel(item.category)} · {conditionLabel(item.condition)}
+            {item.availability === 'unavailable' ? ' · Unavailable' : ''}
+          </Text>
+          {place ? <Text style={styles.previewMeta} numberOfLines={1}>{place}</Text> : null}
+          <View style={styles.previewFoot}>
+            {item.distanceKm !== null ? <Text style={styles.previewDistance}>{formatDistance(item.distanceKm)}</Text> : <View />}
+            <Text style={styles.previewOpen}>View item ›</Text>
+          </View>
+        </View>
+      </TouchableOpacity>
+      {position ? (
+        <View style={styles.stepRow}>
+          <TouchableOpacity onPress={() => onStep(-1)} accessibilityRole="button" accessibilityLabel="Previous item here" hitSlop={8}>
+            <Ionicons name="chevron-back" size={18} color={DARK} />
+          </TouchableOpacity>
+          <Text style={styles.stepText}>
+            {position.index + 1} of {position.count} at this spot
+          </Text>
+          <TouchableOpacity onPress={() => onStep(1)} accessibilityRole="button" accessibilityLabel="Next item here" hitSlop={8}>
+            <Ionicons name="chevron-forward" size={18} color={DARK} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// Items on a map, at their approximate public points (never the precise
+// pickup spot). Uses the same area and radius as the list.
 export default function MapScreen() {
   const router = useRouter();
-  const { items } = useApp();
-  const [selected, setSelected] = useState<string | null>(null);
+  const { activeCategory, setActiveCategory } = useApp();
+  const category = activeCategory === 'all' ? null : (activeCategory as ListingCategory);
+  const discovery = useDiscovery();
+  const [picking, setPicking] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const mapRef = useRef<MapView>(null);
 
-  const selectedItem = items.find(i => i.id === selected);
+  const { area, origin, radiusKm, scope } = discovery;
+  const nearby = area.kind === 'device' || area.kind === 'place';
+  // The map needs somewhere to look: nothing is loaded for "all areas".
+  const feed = useListingFeed({
+    query: '',
+    category,
+    scope,
+    enabled: discovery.ready && scope !== null,
+    pageSize: MAP_PAGE_SIZE,
+  });
+
+  const city = area.kind === 'city' ? cityNamed(area.city) : undefined;
+  const spots = useMemo(() => groupByPoint(feed.items), [feed.items]);
+  const located = useMemo(() => spots.flatMap((s) => s.items), [spots]);
+  const unlocated = feed.items.length - located.length;
+  const firstLocated = located[0]?.approximateLocation;
+  const center = origin ?? city ?? firstLocated ?? null;
+  const region = center ? regionFor(center, nearby ? radiusKm : 6) : null;
+  // The nearest item until the user picks one, so a preview is always shown.
+  const selected = located.find((i) => i.id === selectedId) ?? located[0] ?? null;
+  const selectedSpot = selected ? (spots.find((s) => s.items.includes(selected)) ?? null) : null;
+  const wider = nearby ? nextRadius(radiusKm) : null;
+
+  // A second tap on a selected group moves to its next item.
+  const pressSpot = (spot: MapSpot) => {
+    if (selectedSpot === spot && spot.items.length > 1) step(1);
+    else setSelectedId(spot.items[0]!.id);
+  };
+  const step = (by: 1 | -1) => {
+    if (!selectedSpot || !selected) return;
+    const n = selectedSpot.items.length;
+    const i = selectedSpot.items.indexOf(selected);
+    setSelectedId(selectedSpot.items[(i + by + n) % n]!.id);
+  };
+
+  // Follow a new area or radius.
+  const regionKey = region ? `${region.latitude.toFixed(4)},${region.longitude.toFixed(4)},${region.latitudeDelta.toFixed(4)}` : '';
+  useEffect(() => {
+    if (region) mapRef.current?.animateToRegion(region, 400);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [regionKey]);
+
+  const recenter = () => {
+    const target = area.kind === 'device' ? (discovery.devicePoint ?? origin) : center;
+    if (target) mapRef.current?.animateToRegion(regionFor(target, nearby ? radiusKm : 6), 400);
+  };
+
+  const header = (
+    <SafeAreaView edges={['top']} style={styles.headerWrap}>
+      <View style={styles.header}>
+        <View style={styles.titleRow}>
+          <Text style={styles.title}>Map</Text>
+          <TouchableOpacity style={styles.toggle} onPress={() => router.navigate('/')} accessibilityRole="button" accessibilityLabel="Show as list">
+            <Ionicons name="list" size={15} color={GREEN} />
+            <Text style={styles.toggleText}>List</Text>
+          </TouchableOpacity>
+        </View>
+        <AreaBar onChange={() => setPicking(true)} />
+        <RadiusChips />
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.catContent} style={styles.catScroll}>
+          {FILTERS.map((f) => (
+            <TouchableOpacity
+              key={f.id}
+              style={[styles.catChip, activeCategory === f.id && styles.catChipActive]}
+              onPress={() => setActiveCategory(f.id)}
+              accessibilityRole="button"
+              accessibilityLabel={f.label}
+              accessibilityState={{ selected: activeCategory === f.id }}
+            >
+              <Text style={styles.catIcon}>{f.icon}</Text>
+              <Text style={[styles.catLabel, activeCategory === f.id && styles.catLabelActive]}>{f.label}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+    </SafeAreaView>
+  );
+
+  // No area yet (location off or not chosen): explain instead of an empty map.
+  if (!region) {
+    return (
+      <View style={styles.container}>
+        {header}
+        <View style={styles.fallback}>
+          {discovery.ready && area.kind === 'all' ? (
+            <>
+              <LocationCard onChooseArea={() => setPicking(true)} />
+              <Text style={styles.fallbackTitle}>Choose an area to see items on the map</Text>
+              <Text style={styles.fallbackText}>
+                The map shows items near you or near an area you pick. Items appear at an approximate spot, never the owner’s address.
+              </Text>
+              <TouchableOpacity style={styles.primaryBtn} onPress={() => setPicking(true)} accessibilityRole="button" accessibilityLabel="Choose an area">
+                <Text style={styles.primaryText}>Choose an area</Text>
+              </TouchableOpacity>
+            </>
+          ) : feed.status === 'ready' && area.kind === 'city' ? (
+            <Text style={styles.fallbackText}>No items in {area.city} have a map spot yet. They are in the list view.</Text>
+          ) : (
+            <ActivityIndicator size="large" color={GREEN} accessibilityLabel="Loading map" />
+          )}
+        </View>
+        <AreaPicker visible={picking} onClose={() => setPicking(false)} />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
-      <SafeAreaView edges={['top']} style={styles.headerWrap}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Nearby Items</Text>
-          <Text style={styles.subtitle}>Tap a pin to see item details</Text>
-        </View>
-      </SafeAreaView>
-
-      {/* Simulated Map */}
-      <View style={styles.mapContainer}>
-        {/* Light Green Map Background Grid */}
-        <LinearGradient
-          colors={['#edf4ee', '#f5f9f6', '#ffffff']}
-          style={styles.mapBg}
+      {header}
+      <View style={styles.mapWrap}>
+        <MapView
+          ref={mapRef}
+          testID="items-map"
+          style={StyleSheet.absoluteFill}
+          initialRegion={region}
+          showsUserLocation={discovery.locationStatus === 'ready'}
+          showsMyLocationButton={false}
+          toolbarEnabled={false}
         >
-          {/* Street grid lines */}
-          {[0.2, 0.4, 0.6, 0.8].map(y => (
-            <View key={`h${y}`} style={[styles.streetH, { top: `${y * 100}%` as any }]} />
+          {nearby && origin ? (
+            <Circle
+              center={origin}
+              radius={radiusKm * 1000}
+              strokeColor={GREEN}
+              strokeWidth={1.5}
+              fillColor="rgba(46,125,50,0.08)"
+            />
+          ) : null}
+          {area.kind === 'place' ? (
+            <Marker coordinate={area.place} title={area.place.name} description="Search centre" pinColor="#1d4ed8" />
+          ) : null}
+          {spots.map((spot) => (
+            <SpotMarker key={spot.key} spot={spot} selected={spot === selectedSpot} onPress={() => pressSpot(spot)} />
           ))}
-          {[0.25, 0.5, 0.75].map(x => (
-            <View key={`v${x}`} style={[styles.streetV, { left: `${x * 100}%` as any }]} />
-          ))}
+        </MapView>
 
-          {/* Block fills */}
-          {[
-            { top: 0, left: 0, w: '24%', h: '19%' },
-            { top: 0, left: '26%', w: '23%', h: '19%' },
-            { top: 0, left: '51%', w: '48%', h: '19%' },
-            { top: '21%', left: 0, w: '24%', h: '18%' },
-            { top: '21%', left: '26%', w: '23%', h: '18%' },
-            { top: '21%', left: '51%', w: '48%', h: '18%' },
-            { top: '41%', left: 0, w: '24%', h: '18%' },
-            { top: '41%', left: '26%', w: '23%', h: '18%' },
-            { top: '41%', left: '51%', w: '48%', h: '18%' },
-            { top: '61%', left: 0, w: '24%', h: '38%' },
-            { top: '61%', left: '26%', w: '23%', h: '38%' },
-            { top: '61%', left: '51%', w: '48%', h: '38%' },
-          ].map((b, i) => (
-            <View key={i} style={[styles.block, { top: b.top as any, left: b.left as any, width: b.w as any, height: b.h as any }]} />
-          ))}
+        <TouchableOpacity style={styles.recenter} onPress={recenter} accessibilityRole="button" accessibilityLabel="Recenter map">
+          <Ionicons name="locate" size={20} color={DARK} />
+        </TouchableOpacity>
 
-          {/* You are here (Green Pin Locator) */}
-          <View style={styles.youPin}>
-            <View style={styles.youPinInner}>
-              <View style={styles.youPulse} />
-              <View style={styles.youDot} />
-            </View>
+        {feed.status === 'loading' ? (
+          <View style={styles.overlay} accessibilityLabel="Loading items">
+            <ActivityIndicator color={GREEN} />
+            <Text style={styles.overlayText}>Loading items…</Text>
           </View>
-
-          {/* Item pins */}
-          {PIN_POSITIONS.map(pos => {
-            const item = items.find(i => i.id === pos.id);
-            if (!item) return null;
-            const isSelected = selected === pos.id;
-            return (
-              <TouchableOpacity
-                key={pos.id}
-                style={[
-                  styles.pin,
-                  {
-                    left: `${pos.x * 100}%` as any,
-                    top: `${pos.y * 100}%` as any,
-                  },
-                  isSelected && styles.pinSelected,
-                ]}
-                onPress={() => setSelected(isSelected ? null : pos.id)}
-                activeOpacity={0.85}
-              >
-                <View style={[
-                  styles.pinBubble, 
-                  isSelected && styles.pinBubbleSelected, 
-                  !item.available && styles.pinUnavailable
-                ]}>
-                  <Text style={styles.pinEmoji}>
-                    {item.category === 'Tools' ? '🔧'
-                      : item.category === 'Electronics' ? '📷'
-                      : item.category === 'Outdoor' ? '⛺'
-                      : item.category === 'Kitchen' ? '🍳'
-                      : '🛋️'}
-                  </Text>
-                </View>
-                <View style={[styles.pinTail, isSelected && styles.pinTailSelected]} />
+        ) : feed.status === 'error' ? (
+          <View style={styles.overlay}>
+            <Text style={styles.overlayText}>Could not load items. {errorMessage(feed.error)}</Text>
+            <TouchableOpacity onPress={feed.retry} accessibilityRole="button" accessibilityLabel="Try again">
+              <Text style={styles.overlayAction}>Try again</Text>
+            </TouchableOpacity>
+          </View>
+        ) : feed.items.length === 0 ? (
+          <View style={styles.overlay}>
+            <Text style={styles.overlayText}>
+              {nearby ? `No items within ${radiusKm} km.` : 'No items here yet.'}
+            </Text>
+            {wider ? (
+              <TouchableOpacity onPress={() => discovery.setRadius(wider)} accessibilityRole="button" accessibilityLabel={`Expand to ${wider} km`}>
+                <Text style={styles.overlayAction}>Expand to {wider} km</Text>
               </TouchableOpacity>
-            );
-          })}
-        </LinearGradient>
+            ) : null}
+          </View>
+        ) : unlocated > 0 || feed.hasMore ? (
+          <View style={[styles.overlay, styles.overlaySubtle]}>
+            <Text style={styles.overlayText}>
+              {feed.hasMore ? `Showing the ${MAP_PAGE_SIZE} nearest of ${feed.total}. ` : ''}
+              {unlocated > 0 ? `${unlocated} without a map spot; see the list.` : ''}
+            </Text>
+          </View>
+        ) : null}
 
-        {/* Radius indicator chip */}
-        <View style={styles.radiusChip}>
-          <Ionicons name="radio-button-on" size={12} color={Colors.green || '#2e7d32'} />
-          <Text style={styles.radiusText}>2 km radius</Text>
-        </View>
+        {selected && feed.status === 'ready' ? (
+          <Preview
+            item={selected}
+            position={selectedSpot && selectedSpot.items.length > 1 ? { index: selectedSpot.items.indexOf(selected), count: selectedSpot.items.length } : null}
+            onOpen={() => router.push(`/item/${selected.id}`)}
+            onStep={step}
+          />
+        ) : null}
       </View>
-
-      {/* Bottom context interaction module */}
-      <View style={styles.bottomPanel}>
-        {selectedItem ? (
-          <TouchableOpacity
-            style={styles.selectedCard}
-            onPress={() => router.push(`/item/${selectedItem.id}`)}
-            activeOpacity={0.88}
-          >
-            <Image source={{ uri: selectedItem.image }} style={styles.selectedImg} />
-            <View style={styles.selectedInfo}>
-              <Text style={styles.selectedTitle} numberOfLines={1}>{selectedItem.title}</Text>
-              <Text style={styles.selectedOwner}>{selectedItem.ownerName} · {selectedItem.distance}</Text>
-              <View style={styles.selectedMeta}>
-                <View style={[styles.availDot, { backgroundColor: selectedItem.available ? (Colors.green || '#2e7d32') : Colors.slate }]} />
-                <Text style={styles.availText}>{selectedItem.available ? 'Available' : 'In Use'}</Text>
-                {selectedItem.teachMeEnabled && (
-                  <View style={styles.teachChip}>
-                    <Text style={styles.teachChipText}>🎓 Teach Me</Text>
-                  </View>
-                )}
-              </View>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={Colors.slate} />
-          </TouchableOpacity>
-        ) : (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.nearbyList}>
-            <Text style={styles.nearbyLabel}>Nearby items</Text>
-            {items.filter(i => i.available).slice(0, 5).map(item => (
-              <TouchableOpacity
-                key={item.id}
-                style={styles.nearbyChip}
-                onPress={() => setSelected(item.id)}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.nearbyChipEmoji}>
-                  {item.category === 'Tools' ? '🔧' : item.category === 'Electronics' ? '📷' : '🏠'}
-                </Text>
-                <Text style={styles.nearbyChipText} numberOfLines={1}>{item.title}</Text>
-                <Text style={styles.nearbyChipDist}>{item.distance}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        )}
-      </View>
+      <AreaPicker visible={picking} onClose={() => setPicking(false)} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.offWhite },
-  headerWrap: { backgroundColor: Colors.white },
-  header: { 
-    paddingHorizontal: Spacing.xl, 
-    paddingTop: Spacing.sm, 
-    paddingBottom: Spacing.lg,
-    backgroundColor: Colors.white,
-    borderBottomWidth: 1,
-    borderColor: Colors.fog 
-  },
-  title: { fontSize: Typography.sizes.xl, fontWeight: Typography.weights.extrabold, color: Colors.greenDark || '#1b5e20' },
-  subtitle: { fontSize: Typography.sizes.sm, color: Colors.slate, marginTop: 2 },
-  mapContainer: { height: MAP_HEIGHT, position: 'relative' },
-  mapBg: { flex: 1 },
-  streetH: { position: 'absolute', left: 0, right: 0, height: 6, backgroundColor: Colors.white, opacity: 0.8 },
-  streetV: { position: 'absolute', top: 0, bottom: 0, width: 6, backgroundColor: Colors.white, opacity: 0.8 },
-  block: { position: 'absolute', backgroundColor: 'rgba(220,235,223,0.7)', borderRadius: 4 },
-  youPin: { position: 'absolute', left: '50%', top: '50%', marginLeft: -16, marginTop: -16 },
-  youPinInner: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
-  youPulse: {
-    position: 'absolute', width: 32, height: 32, borderRadius: 16,
-    backgroundColor: Colors.green || '#2e7d32', opacity: 0.2,
-  },
-  youDot: { width: 14, height: 14, borderRadius: 7, backgroundColor: Colors.green || '#2e7d32', borderWidth: 2, borderColor: Colors.white, ...Shadows.sm },
-  pin: { position: 'absolute', alignItems: 'center', marginLeft: -18, marginTop: -46 },
-  pinSelected: { zIndex: 10 },
-  pinBubble: {
-    width: 36, height: 36, borderRadius: 18,
-    backgroundColor: Colors.white, alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: Colors.green || '#2e7d32',
-    ...Shadows.md,
-  },
-  pinBubbleSelected: { 
-    width: 44, height: 44, borderRadius: 22, 
-    backgroundColor: Colors.green || '#2e7d32', 
-    borderColor: Colors.white 
-  },
-  pinUnavailable: { borderColor: Colors.slate, opacity: 0.6 },
-  pinEmoji: { fontSize: 16 },
-  pinTail: { 
-    width: 0, height: 0, 
-    borderLeftWidth: 5, borderRightWidth: 5, borderTopWidth: 8, 
-    borderLeftColor: 'transparent', borderRightColor: 'transparent', 
-    borderTopColor: Colors.green || '#2e7d32' 
-  },
-  pinTailSelected: { borderTopColor: Colors.green || '#2e7d32' },
-  radiusChip: {
-    position: 'absolute', bottom: 12, right: 12,
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    backgroundColor: 'rgba(255, 255, 255, 0.9)', borderRadius: Radii.full,
+  headerWrap: { backgroundColor: Colors.white, borderBottomWidth: 1, borderColor: Colors.fog, ...Shadows.sm },
+  header: { paddingHorizontal: Spacing.xl, paddingBottom: Spacing.sm },
+  titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: Spacing.sm, marginBottom: Spacing.xs },
+  title: { fontSize: Typography.sizes.xl, fontWeight: Typography.weights.extrabold, color: DARK },
+  toggle: {
+    flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: Colors.fog, borderRadius: Radii.full,
     paddingHorizontal: Spacing.sm, paddingVertical: 4,
-    borderWidth: 1, borderColor: Colors.fog,
-    ...Shadows.sm,
   },
-  radiusText: { fontSize: Typography.sizes.xs, color: Colors.greenDark || '#1b5e20', fontWeight: Typography.weights.semibold },
-  bottomPanel: { 
-    flex: 1, 
-    backgroundColor: Colors.white, 
-    borderTopLeftRadius: Radii.xl, 
-    borderTopRightRadius: Radii.xl, 
-    marginTop: -20, 
-    padding: Spacing.xl, 
-    borderWidth: 1,
-    borderColor: Colors.fog,
-    ...Shadows.lg 
+  toggleText: { fontSize: Typography.sizes.xs, fontWeight: Typography.weights.bold, color: DARK },
+  catScroll: { marginHorizontal: -Spacing.xl },
+  catContent: { paddingHorizontal: Spacing.xl, gap: Spacing.sm },
+  catChip: {
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.xs, backgroundColor: Colors.offWhite, borderRadius: Radii.full,
+    paddingHorizontal: Spacing.md, paddingVertical: Spacing.xs + 2, borderWidth: 1, borderColor: Colors.fog,
   },
-  selectedCard: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
-  selectedImg: { width: 64, height: 64, borderRadius: Radii.md },
-  selectedInfo: { flex: 1 },
-  selectedTitle: { fontSize: Typography.sizes.md, fontWeight: Typography.weights.bold, color: Colors.greenDark || '#1b5e20' },
-  selectedOwner: { fontSize: Typography.sizes.sm, color: Colors.slate, marginTop: 2 },
-  selectedMeta: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginTop: 6 },
-  availDot: { width: 8, height: 8, borderRadius: 4 },
-  availText: { fontSize: Typography.sizes.xs, color: Colors.slate },
-  teachChip: { backgroundColor: (Colors.green || '#2e7d32') + '15', borderRadius: Radii.full, paddingHorizontal: 6, paddingVertical: 2 },
-  teachChipText: { fontSize: Typography.sizes.xs, color: Colors.greenDark || '#1b5e20', fontWeight: Typography.weights.bold },
-  nearbyList: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, paddingRight: Spacing.xl },
-  nearbyLabel: { fontSize: Typography.sizes.sm, color: Colors.slate, fontWeight: Typography.weights.bold, marginRight: Spacing.xs },
-  nearbyChip: {
-    backgroundColor: Colors.offWhite, borderRadius: Radii.lg,
-    paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm,
-    alignItems: 'center', minWidth: 100, 
-    borderWidth: 1, borderColor: Colors.fog,
-    ...Shadows.sm,
+  catChipActive: { backgroundColor: GREEN + '15', borderColor: GREEN },
+  catIcon: { fontSize: 14 },
+  catLabel: { fontSize: Typography.sizes.sm, color: Colors.slate, fontWeight: Typography.weights.medium },
+  catLabelActive: { color: DARK, fontWeight: Typography.weights.semibold },
+  mapWrap: { flex: 1, marginBottom: 84 },
+  recenter: {
+    position: 'absolute', right: Spacing.lg, top: Spacing.lg, width: 44, height: 44, borderRadius: 22,
+    backgroundColor: Colors.white, alignItems: 'center', justifyContent: 'center', ...Shadows.md,
   },
-  nearbyChipEmoji: { fontSize: 22, marginBottom: 4 },
-  nearbyChipText: { fontSize: Typography.sizes.xs, fontWeight: Typography.weights.bold, color: Colors.greenDark || '#1b5e20', textAlign: 'center' },
-  nearbyChipDist: { fontSize: 10, color: Colors.slate, marginTop: 2 },
+  overlay: {
+    position: 'absolute', left: Spacing.lg, right: 76, top: Spacing.lg, backgroundColor: Colors.white, borderRadius: Radii.md,
+    padding: Spacing.md, gap: 4, ...Shadows.sm,
+  },
+  overlaySubtle: { backgroundColor: 'rgba(255,255,255,0.92)' },
+  overlayText: { fontSize: Typography.sizes.sm, color: Colors.navyMid },
+  overlayAction: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.bold, color: GREEN },
+  pinWrap: { alignItems: 'center' },
+  pin: {
+    flexDirection: 'row', alignItems: 'center', gap: 3, maxWidth: 130, backgroundColor: Colors.white, borderRadius: Radii.full,
+    borderWidth: 1.5, borderColor: GREEN, paddingHorizontal: 7, paddingVertical: 3,
+  },
+  pinMuted: { borderColor: '#94a3b8' },
+  pinSelected: { backgroundColor: DARK, borderColor: DARK, paddingHorizontal: 9, paddingVertical: 5 },
+  pinIcon: { fontSize: 12 },
+  pinLabel: { flexShrink: 1, fontSize: 11, fontWeight: Typography.weights.bold, color: DARK },
+  pinLabelSelected: { color: Colors.white, fontSize: 12 },
+  pinTail: {
+    width: 0, height: 0, borderLeftWidth: 5, borderRightWidth: 5, borderTopWidth: 6,
+    borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: GREEN,
+  },
+  pinTailMuted: { borderTopColor: '#94a3b8' },
+  pinTailSelected: { borderTopColor: DARK },
+  preview: {
+    position: 'absolute', left: Spacing.lg, right: Spacing.lg, bottom: Spacing.lg,
+    backgroundColor: Colors.white, borderRadius: Radii.lg, padding: Spacing.md, ...Shadows.md,
+  },
+  previewMain: { flexDirection: 'row', gap: Spacing.md },
+  previewImage: { width: 76, height: 76, borderRadius: Radii.md },
+  previewPlaceholder: { backgroundColor: Colors.fog, alignItems: 'center', justifyContent: 'center' },
+  previewTitle: { fontSize: Typography.sizes.base, fontWeight: Typography.weights.bold, color: DARK },
+  previewMeta: { fontSize: Typography.sizes.xs, color: Colors.slate, marginTop: 2 },
+  previewFoot: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: Spacing.xs },
+  previewDistance: { fontSize: Typography.sizes.xs, color: GREEN, fontWeight: Typography.weights.semibold },
+  previewOpen: { fontSize: Typography.sizes.xs, color: GREEN, fontWeight: Typography.weights.bold },
+  stepRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: Spacing.md,
+    marginTop: Spacing.sm, paddingTop: Spacing.sm, borderTopWidth: 1, borderColor: Colors.fog,
+  },
+  stepText: { fontSize: Typography.sizes.xs, color: Colors.navyMid, fontWeight: Typography.weights.semibold },
+  fallback: { flex: 1, padding: Spacing.xl, alignItems: 'stretch', justifyContent: 'flex-start', paddingTop: Spacing.xl },
+  fallbackTitle: { fontSize: Typography.sizes.lg, fontWeight: Typography.weights.bold, color: DARK, textAlign: 'center', marginTop: Spacing.md },
+  fallbackText: { fontSize: Typography.sizes.sm, color: Colors.slate, textAlign: 'center', marginTop: Spacing.sm },
+  primaryBtn: { alignSelf: 'center', marginTop: Spacing.lg, backgroundColor: GREEN, borderRadius: Radii.full, paddingHorizontal: Spacing.xl, paddingVertical: Spacing.sm + 2 },
+  primaryText: { color: Colors.white, fontWeight: Typography.weights.bold, fontSize: Typography.sizes.sm },
 });

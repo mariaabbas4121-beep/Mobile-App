@@ -64,12 +64,23 @@ const SUPABASE_STUB = `
 
 const MIGRATIONS_DIR = join(import.meta.dirname, '..', '..', 'supabase', 'migrations');
 
-export async function createMigratedDb(): Promise<PGlite> {
+// `before` runs a step just before the named migration file, e.g. to seed
+// rows that a data migration should transform.
+export async function createMigratedDb(before: Record<string, (db: PGlite) => Promise<void>> = {}): Promise<PGlite> {
   // btree_gist backs the borrow-request exclusion constraint, as on Supabase.
   const db = await PGlite.create({ extensions: { btree_gist } });
   await db.exec(SUPABASE_STUB);
   for (const file of readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort()) {
-    await db.exec(readFileSync(join(MIGRATIONS_DIR, file), 'utf8'));
+    const sql = readFileSync(join(MIGRATIONS_DIR, file), 'utf8');
+    await before[file]?.(db);
+    try {
+      await db.exec(sql);
+    } catch (err) {
+      // Name the file and show where it failed; PGlite reports only an offset.
+      const at = Number((err as { position?: string }).position ?? 0);
+      const line = at ? sql.slice(0, at).split(/\r?\n/).length : 0;
+      throw new Error(`${file}${line ? ` line ${line}` : ''}: ${(err as Error).message}`, { cause: err });
+    }
   }
   return db;
 }

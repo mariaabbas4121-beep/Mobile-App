@@ -4,6 +4,7 @@ import { SessionManager } from '../../lib/auth/sessionManager';
 import { createMemoryTokenStorage, type TokenStorage } from '../../lib/auth/tokenStorage';
 import type { GoogleAuth } from '../../lib/auth/googleAuth';
 import type { AuthServices } from '../../context/AuthContext';
+import { LocationServicesOffError, type LocationService, type PermissionInfo } from '../../lib/location/deviceLocation';
 
 export const NOW = 1_800_000_000; // fixed clock, Unix seconds
 
@@ -94,6 +95,12 @@ export function fakeApi(): FakeApi {
     uploadItemImage: jest.fn(async () => ({ image: { id: 'img-1', url: 'https://storage.test/img-1', contentType: 'image/jpeg', createdAt: '2026-10-28T10:00:00Z' } })),
     deleteItemImage: jest.fn(async () => undefined),
     getBookedDates: jest.fn(async () => ({ bookedDates: [] })),
+    getItemLocation: jest.fn(async () => ({ location: null })),
+    setItemLocation: jest.fn(async (_t: string, _id: string, point: { latitude: number; longitude: number }) => ({
+      location: { ...point, updatedAt: '2026-11-04T10:00:00Z' },
+      listing: listing({ approximateLocation: { latitude: point.latitude + 0.003, longitude: point.longitude } }),
+    })),
+    clearItemLocation: jest.fn(async () => undefined),
     createBorrowRequest: jest.fn(async () => ({ request: borrowRequest() })),
     listOutgoingRequests: jest.fn(async () => ({ items: [], pagination: { page: 1, pageSize: 20, total: 0, totalPages: 0 } })),
     listIncomingRequests: jest.fn(async () => ({ items: [], pagination: { page: 1, pageSize: 20, total: 0, totalPages: 0 } })),
@@ -108,6 +115,7 @@ export function fakeApi(): FakeApi {
       duplicate: false,
     })),
     markConversationRead: jest.fn(async () => ({ conversation: conversation({ unreadCount: 0 }) })),
+    getActivity: jest.fn(async () => ({ items: [], unavailable: [] })),
   };
 }
 
@@ -167,6 +175,9 @@ export const listing = (overrides: Partial<Listing> = {}): Listing => ({
   replacementValuePkr: 15000,
   borrowingTerms: null,
   area: 'UAF Hostel 3',
+  city: 'Faisalabad',
+  approximateLocation: null,
+  distanceKm: null,
   availability: 'available',
   teachMeEnabled: false,
   tags: ['DIY'],
@@ -211,4 +222,54 @@ export function services(opts: { api?: FakeApi; storage?: TokenStorage; google?:
     googleAuth,
     asServices: { api, sessionManager, googleAuth } as unknown as AuthServices,
   };
+}
+
+// The pilot area: University of Agriculture, Faisalabad.
+export const UAF = { latitude: 31.431, longitude: 73.07 };
+
+// A device location stand-in. Starts "not asked yet", with location
+// services on and Android's in-app "turn on" dialog; tests change it.
+export function fakeLocation(
+  overrides: Partial<{ [K in keyof LocationService]: LocationService[K] extends (...args: never[]) => unknown ? jest.Mock : LocationService[K] }> = {},
+) {
+  let permission: PermissionInfo = { status: 'undetermined', canAskAgain: true };
+  let servicesOn = true;
+  const watchers = new Set<(p: { latitude: number; longitude: number }) => void>();
+  const fake = {
+    permission: jest.fn(async () => permission),
+    requestPermission: jest.fn(async () => {
+      permission = { status: 'granted', canAskAgain: true };
+      return permission;
+    }),
+    servicesEnabled: jest.fn(async () => servicesOn),
+    // The user confirms the system dialog by default.
+    enableServices: jest.fn(async () => {
+      servicesOn = true;
+      return true;
+    }),
+    canEnableServicesInApp: true,
+    // Like the real service: no fix while location services are off.
+    current: jest.fn(async () => {
+      if (!servicesOn) throw new LocationServicesOffError();
+      return UAF;
+    }),
+    watch: jest.fn(async (cb: (p: { latitude: number; longitude: number }) => void) => {
+      watchers.add(cb);
+      return () => watchers.delete(cb);
+    }),
+    openSettings: jest.fn(),
+    ...overrides,
+    setPermission(next: PermissionInfo) {
+      permission = next;
+    },
+    setServices(on: boolean) {
+      servicesOn = on;
+    },
+    // Simulates the device reporting a new position.
+    move(point: { latitude: number; longitude: number }) {
+      for (const w of watchers) w(point);
+    },
+    watcherCount: () => watchers.size,
+  };
+  return fake;
 }

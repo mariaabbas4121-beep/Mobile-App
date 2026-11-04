@@ -1,4 +1,5 @@
 import type {
+  ActivityFeed,
   ApiErrorCode,
   BorrowRequest,
   BorrowRequestInput,
@@ -19,6 +20,7 @@ import type {
   MessagePage,
   OnboardingStatus,
   PhoneStartResult,
+  PickupLocation,
   PhoneVerification,
   Profile,
   ProfileUpdate,
@@ -81,7 +83,7 @@ export class ApiError extends Error {
 export const isApiError = (e: unknown): e is ApiError => e instanceof ApiError;
 
 interface RequestOptions {
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string;
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
@@ -259,6 +261,18 @@ export function createApiClient({
     // or blob: on the web).
     uploadItemImage: (accessToken: string, id: string, fileUri: string, contentType: ImageUploadType) =>
       upload<{ image: ListingImage }>(`/items/${encodeURIComponent(id)}/images`, fileUri, contentType, accessToken),
+    // The precise pickup point: owner only. Others see approximateLocation.
+    getItemLocation: (accessToken: string, id: string) =>
+      request<{ location: PickupLocation | null }>({ method: 'GET', path: `/items/${encodeURIComponent(id)}/location`, accessToken }),
+    setItemLocation: (accessToken: string, id: string, point: { latitude: number; longitude: number }) =>
+      request<{ location: PickupLocation; listing: Listing }>({
+        method: 'PUT',
+        path: `/items/${encodeURIComponent(id)}/location`,
+        body: point,
+        accessToken,
+      }),
+    clearItemLocation: (accessToken: string, id: string) =>
+      request<void>({ method: 'DELETE', path: `/items/${encodeURIComponent(id)}/location`, accessToken }),
     // Public; dates only. Used to grey out booked days in the request form.
     getBookedDates: (id: string, accessToken?: string) =>
       request<{ bookedDates: DateRange[] }>({
@@ -306,6 +320,11 @@ export function createApiClient({
       }),
     markConversationRead: (accessToken: string, id: string) =>
       request<{ conversation: Conversation }>({ method: 'POST', path: `/conversations/${encodeURIComponent(id)}/read`, body: {}, accessToken }),
+
+    // The caller's own recent activity, derived on the server from their
+    // requests, conversations and listings.
+    getActivity: (accessToken: string, query: { limit?: number } = {}) =>
+      request<ActivityFeed>({ method: 'GET', path: '/activity', query: { ...query }, accessToken }),
 
     deleteItemImage: (accessToken: string, id: string, imageId: string) =>
       request<void>({

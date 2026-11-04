@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 import type { ApiClient } from '../lib/api/client';
-import type { Listing, ListingAvailability, ListingInput, ListingPage, ListingQuery } from '../lib/api/types';
+import type { GeoPoint, Listing, ListingAvailability, ListingInput, ListingPage, ListingQuery, PickupLocation } from '../lib/api/types';
 import type { SessionManager } from '../lib/auth/sessionManager';
 import type { LocalPhoto } from '../lib/listings/photos';
 
@@ -15,7 +15,12 @@ export interface SaveResult {
   failedPhotos: number;
   // First upload error, for the message shown to the user.
   photoError: unknown;
+  // The pickup spot could not be saved (the listing itself was).
+  locationError: unknown;
 }
+
+// Pickup spot change on save: set it, remove it, or leave it as it is.
+export type LocationChange = { set: GeoPoint } | { clear: true } | null;
 
 export interface ListingsContextValue {
   // Bumped after every successful change, so screens showing listings
@@ -26,11 +31,14 @@ export interface ListingsContextValue {
   lastCreatedId: string | null;
   list: (query: ListingQuery) => Promise<ListingPage>;
   get: (id: string) => Promise<Listing>;
-  create: (input: ListingInput, photos: LocalPhoto[]) => Promise<SaveResult>;
+  // The owner's precise pickup spot, for the edit form.
+  getPickupLocation: (id: string) => Promise<PickupLocation | null>;
+  create: (input: ListingInput, photos: LocalPhoto[], location?: LocationChange) => Promise<SaveResult>;
   update: (
     id: string,
     changes: Partial<ListingInput>,
     photos?: { add: LocalPhoto[]; removeIds: string[] },
+    location?: LocationChange,
   ) => Promise<SaveResult>;
   setAvailability: (id: string, availability: ListingAvailability) => Promise<Listing>;
   archive: (id: string) => Promise<Listing>;
@@ -78,26 +86,51 @@ export function ListingsProvider({ children, services }: { children: ReactNode; 
     [api, sessionManager],
   );
 
+  // Never changes a listing's spot unless the owner chose to.
+  const saveLocation = useCallback(
+    async (id: string, location: LocationChange | undefined) => {
+      if (!location) return null;
+      try {
+        if ('set' in location) await sessionManager.authorized((t) => api.setItemLocation(t, id, location.set));
+        else await sessionManager.authorized((t) => api.clearItemLocation(t, id));
+        return null;
+      } catch (err) {
+        return err;
+      }
+    },
+    [api, sessionManager],
+  );
+
   const list = useCallback((query: ListingQuery) => read((t) => api.listItems(query, t)), [api, read]);
+  const getPickupLocation = useCallback(
+    async (id: string) => (await sessionManager.authorized((t) => api.getItemLocation(t, id))).location,
+    [api, sessionManager],
+  );
   const get = useCallback(async (id: string) => (await read((t) => api.getItem(id, t))).listing, [api, read]);
 
   const create = useCallback(
-    async (input: ListingInput, photos: LocalPhoto[]): Promise<SaveResult> => {
+    async (input: ListingInput, photos: LocalPhoto[], location: LocationChange = null): Promise<SaveResult> => {
       const { listing } = await sessionManager.authorized((t) => api.createItem(t, input));
-      // The listing exists from here on, whatever happens to the photos.
+      // The listing exists from here on, whatever happens to photos or spot.
       setLastCreatedId(listing.id);
       changed();
-      if (photos.length === 0) return { listing, failedPhotos: 0, photoError: null };
+      const locationError = await saveLocation(listing.id, location);
+      if (photos.length === 0 && !location) return { listing, failedPhotos: 0, photoError: null, locationError: null };
       const { failed, firstError } = await uploadPhotos(listing.id, photos);
       const latest = await get(listing.id).catch(() => listing);
       changed();
-      return { listing: latest, failedPhotos: failed, photoError: firstError };
+      return { listing: latest, failedPhotos: failed, photoError: firstError, locationError };
     },
-    [api, sessionManager, uploadPhotos, get, changed],
+    [api, sessionManager, uploadPhotos, saveLocation, get, changed],
   );
 
   const update = useCallback(
-    async (id: string, changes: Partial<ListingInput>, photos = { add: [] as LocalPhoto[], removeIds: [] as string[] }) => {
+    async (
+      id: string,
+      changes: Partial<ListingInput>,
+      photos = { add: [] as LocalPhoto[], removeIds: [] as string[] },
+      location: LocationChange = null,
+    ) => {
       let listing: Listing | null = null;
       if (Object.keys(changes).length > 0) {
         listing = (await sessionManager.authorized((t) => api.updateItem(t, id, changes))).listing;
@@ -108,13 +141,14 @@ export function ListingsProvider({ children, services }: { children: ReactNode; 
         changed();
       }
       const { failed, firstError } = await uploadPhotos(id, photos.add);
-      if (photos.add.length > 0 || photos.removeIds.length > 0 || !listing) {
+      const locationError = await saveLocation(id, location);
+      if (photos.add.length > 0 || photos.removeIds.length > 0 || location || !listing) {
         listing = await get(id);
         changed();
       }
-      return { listing, failedPhotos: failed, photoError: firstError };
+      return { listing, failedPhotos: failed, photoError: firstError, locationError };
     },
-    [api, sessionManager, uploadPhotos, get, changed],
+    [api, sessionManager, uploadPhotos, saveLocation, get, changed],
   );
 
   const setAvailability = useCallback(
@@ -137,8 +171,8 @@ export function ListingsProvider({ children, services }: { children: ReactNode; 
   );
 
   const value = useMemo<ListingsContextValue>(
-    () => ({ revision, lastCreatedId, list, get, create, update, setAvailability, archive }),
-    [revision, lastCreatedId, list, get, create, update, setAvailability, archive],
+    () => ({ revision, lastCreatedId, list, get, getPickupLocation, create, update, setAvailability, archive }),
+    [revision, lastCreatedId, list, get, getPickupLocation, create, update, setAvailability, archive],
   );
 
   return <ListingsContext.Provider value={value}>{children}</ListingsContext.Provider>;

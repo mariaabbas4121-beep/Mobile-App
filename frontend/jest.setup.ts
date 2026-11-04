@@ -25,3 +25,36 @@ jest.mock('expo-secure-store', () => {
     __store: store,
   };
 });
+
+// react-native-maps needs its native module. Tests get a plain view whose
+// markers are pressable, labelled by their accessibilityLabel.
+jest.mock('react-native-maps', () => {
+  const React = jest.requireActual('react');
+  const { Pressable, View } = jest.requireActual('react-native');
+  const MapView = React.forwardRef(({ children, testID }: { children?: unknown; testID?: string }, ref: unknown) => {
+    React.useImperativeHandle(ref, () => ({ animateToRegion: jest.fn() }));
+    return React.createElement(View, { testID }, children);
+  });
+  const Marker = ({
+    onPress,
+    accessibilityLabel,
+    title,
+    children,
+  }: {
+    onPress?: (e: unknown) => void;
+    accessibilityLabel?: string;
+    title?: string;
+    children?: unknown;
+  }) =>
+    React.createElement(
+      Pressable,
+      {
+        accessibilityRole: 'button',
+        accessibilityLabel: accessibilityLabel ?? title,
+        onPress: () => onPress?.({ stopPropagation: () => undefined }),
+      },
+      children,
+    );
+  const Circle = () => React.createElement(View, { testID: 'radius-circle' });
+  return { __esModule: true, default: MapView, Marker, Circle };
+});

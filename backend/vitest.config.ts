@@ -17,7 +17,9 @@ export default defineConfig({
           include: ['tests/db/**/*.test.ts'],
           environment: 'node',
           testTimeout: 30_000,
-          hookTimeout: 60_000,
+          // Each file migrates its own database; alongside the unit tests on
+          // a busy machine that has taken over a minute.
+          hookTimeout: 180_000,
         },
       },
       {

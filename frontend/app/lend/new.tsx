@@ -10,10 +10,13 @@ import { Ionicons } from '@expo/vector-icons';
 import Toast from 'react-native-toast-message';
 import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '../../context/AuthContext';
-import { useListings, type SaveResult } from '../../context/ListingsContext';
+import { useListings, type LocationChange, type SaveResult } from '../../context/ListingsContext';
+import { useDiscovery } from '../../context/DiscoveryContext';
+import { SpotPicker } from '../../components/discovery/SpotPicker';
+import { CITIES, cityNamed } from '../../lib/location/places';
 import { useSubmit } from '../../components/auth/useSubmit';
 import { isApiError } from '../../lib/api/client';
-import type { Listing, ListingImage, ListingInput } from '../../lib/api/types';
+import type { GeoPoint, Listing, ListingImage, ListingInput } from '../../lib/api/types';
 import { errorMessage } from '../../lib/auth/messages';
 import { CATEGORY_OPTIONS, CONDITION_OPTIONS, MAX_LISTING_PHOTOS } from '../../lib/listings/options';
 import { toLocalPhoto, type LocalPhoto } from '../../lib/listings/photos';
@@ -33,6 +36,7 @@ const formFrom = (l: Listing): ListingForm => ({
   replacementValue: l.replacementValuePkr != null ? String(l.replacementValuePkr) : '',
   borrowingTerms: l.borrowingTerms ?? '',
   area: l.area ?? '',
+  city: l.city ?? '',
   tags: l.tags.join(', '),
   teachMeEnabled: l.teachMeEnabled,
 });
@@ -47,6 +51,7 @@ function changesFrom(saved: Listing, input: ListingInput): Partial<ListingInput>
   if ((input.replacementValuePkr ?? null) !== saved.replacementValuePkr) changes.replacementValuePkr = input.replacementValuePkr ?? null;
   if ((input.borrowingTerms ?? null) !== saved.borrowingTerms) changes.borrowingTerms = input.borrowingTerms ?? null;
   if ((input.area ?? null) !== saved.area) changes.area = input.area ?? null;
+  if ((input.city ?? null) !== saved.city) changes.city = input.city ?? null;
   if (input.teachMeEnabled !== saved.teachMeEnabled) changes.teachMeEnabled = input.teachMeEnabled ?? false;
   if ((input.tags ?? []).join('\u0000') !== saved.tags.join('\u0000')) changes.tags = input.tags ?? [];
   return changes;
@@ -62,6 +67,7 @@ export default function LendNewScreen() {
   const editing = Boolean(editId);
   const listings = useListings();
   const { profile } = useAuth();
+  const discovery = useDiscovery();
 
   const [form, setForm] = useState<ListingForm>({
     title: '',
@@ -72,6 +78,7 @@ export default function LendNewScreen() {
     borrowingTerms: '',
     // A sensible default the owner can change; never more precise than this.
     area: profile?.neighborhood ?? '',
+    city: profile?.city ?? '',
     tags: '',
     teachMeEnabled: false,
   });
@@ -83,6 +90,13 @@ export default function LendNewScreen() {
   // Photos already on the listing that the owner keeps, and new ones to upload.
   const [keptImages, setKeptImages] = useState<ListingImage[]>([]);
   const [newPhotos, setNewPhotos] = useState<LocalPhoto[]>([]);
+  // Pickup spot: as saved, and as chosen now. Only an explicit choice here
+  // ever changes it.
+  const [savedSpot, setSavedSpot] = useState<GeoPoint | null>(null);
+  const [spot, setSpot] = useState<GeoPoint | null>(null);
+  const [spotBusy, setSpotBusy] = useState(false);
+  const [spotNote, setSpotNote] = useState<string | null>(null);
+  const [pickingSpot, setPickingSpot] = useState(false);
 
   const set = <K extends keyof ListingForm>(key: K, value: ListingForm[K]) => {
     setForm((f) => ({ ...f, [key]: value }));
@@ -97,6 +111,11 @@ export default function LendNewScreen() {
       setSaved(listing);
       setForm(formFrom(listing));
       setKeptImages(listing.images);
+      // The precise spot is the owner's own; failing to read it is not fatal.
+      const location = await listings.getPickupLocation(editId).catch(() => null);
+      const point = location ? { latitude: location.latitude, longitude: location.longitude } : null;
+      setSavedSpot(point);
+      setSpot(point);
       setLoadState('ready');
     } catch (err) {
       setLoadError(err);
@@ -112,9 +131,43 @@ export default function LendNewScreen() {
 
   // The profile may finish loading after this screen opens.
   const neighborhood = profile?.neighborhood;
+  const profileCity = profile?.city;
   useEffect(() => {
     if (!editing && neighborhood) setForm((f) => (f.area ? f : { ...f, area: neighborhood }));
-  }, [editing, neighborhood]);
+    if (!editing && profileCity) setForm((f) => (f.city ? f : { ...f, city: profileCity }));
+  }, [editing, neighborhood, profileCity]);
+
+  const takeCurrentSpot = async () => {
+    setSpotNote(null);
+    setSpotBusy(true);
+    const result = await discovery.currentPoint();
+    setSpotBusy(false);
+    if ('point' in result) {
+      setSpot(result.point);
+      return;
+    }
+    setSpotNote(
+      result.problem === 'blocked'
+        ? 'Location is turned off for NeighborShare in Settings. Pick the spot on the map instead.'
+        : result.problem === 'denied'
+          ? 'Location permission was not given. Pick the spot on the map instead.'
+          : result.problem === 'services_off'
+            ? 'Your phone’s location (GPS) is off. Turn it on and try again, or pick the spot on the map.'
+            : result.problem === 'timeout'
+              ? 'Finding your location took too long. Try again or pick the spot on the map.'
+              : 'Your location is not available. Pick the spot on the map instead.',
+    );
+  };
+
+  // Where the map picker opens: the chosen spot, the device, the search
+  // area, the listing's city, or the pilot city.
+  const pickerStart: GeoPoint = spot ?? discovery.devicePoint ?? discovery.origin ?? cityNamed(form.city) ?? CITIES[0]!;
+
+  const spotChange = (): LocationChange => {
+    if (spot && (!savedSpot || spot.latitude !== savedSpot.latitude || spot.longitude !== savedSpot.longitude)) return { set: spot };
+    if (!spot && savedSpot) return { clear: true };
+    return null;
+  };
 
   const photoCount = keptImages.length + newPhotos.length;
 
@@ -166,16 +219,22 @@ export default function LendNewScreen() {
       try {
         if (editId && saved) {
           const removeIds = saved.images.filter((img) => !keptImages.some((k) => k.id === img.id)).map((img) => img.id);
-          result = await listings.update(editId, changesFrom(saved, input), { add: newPhotos, removeIds });
+          result = await listings.update(editId, changesFrom(saved, input), { add: newPhotos, removeIds }, spotChange());
         } else {
-          result = await listings.create(input, newPhotos);
+          result = await listings.create(input, newPhotos, spotChange());
         }
       } catch (err) {
         if (isApiError(err) && err.code === 'VALIDATION_ERROR') setErrors(serverFieldErrors(err.fieldIssues));
         setFormError(errorMessage(err));
         return;
       }
-      if (result.failedPhotos > 0) {
+      if (result.locationError) {
+        Toast.show({
+          type: 'error',
+          text1: editing ? 'Changes saved, but the pickup spot was not' : 'Item listed, but the pickup spot was not saved',
+          text2: `${errorMessage(result.locationError)} You can set it by editing the listing.`,
+        });
+      } else if (result.failedPhotos > 0) {
         Toast.show({
           type: 'error',
           text1: editing ? 'Changes saved, but some photos failed' : 'Item listed, but some photos failed',
@@ -189,7 +248,7 @@ export default function LendNewScreen() {
         );
       }
       router.back();
-    }, [form, editId, editing, saved, keptImages, newPhotos, listings, router]),
+    }, [form, editId, editing, saved, keptImages, newPhotos, listings, router, spot, savedSpot]),
   );
 
   if (loadState !== 'ready') {
@@ -358,6 +417,72 @@ export default function LendNewScreen() {
             />
             <FieldError message={errors.area} />
           </View>
+
+          {/* City */}
+          <View style={styles.field}>
+            <Text style={styles.label}>City</Text>
+            <TextInput
+              style={[styles.input, errors.city && styles.inputError]}
+              value={form.city}
+              onChangeText={(v) => set('city', v)}
+              placeholder="e.g. Faisalabad"
+              placeholderTextColor={Colors.slate}
+              maxLength={80}
+              accessibilityLabel="City"
+            />
+            <FieldError message={errors.city} />
+          </View>
+
+          {/* Pickup spot */}
+          <View style={styles.field}>
+            <Text style={styles.label}>Pickup spot (recommended)</Text>
+            <Text style={styles.spotHelp}>
+              Lets neighbours nearby find this item. They only see an approximate spot about 0.5 km away, never your address.
+              It stays where you put it, even when you move around.
+            </Text>
+            <View style={styles.spotStatus} accessibilityLabel={spot ? 'Pickup spot set' : 'No pickup spot'}>
+              <Ionicons name={spot ? 'location' : 'location-outline'} size={16} color={spot ? (Colors.green || '#2e7d32') : Colors.slate} />
+              <Text style={styles.spotStatusText}>
+                {spot ? 'Pickup spot set' : 'No pickup spot yet: shown only when browsing the whole city'}
+              </Text>
+            </View>
+            <View style={styles.spotActions}>
+              <TouchableOpacity
+                style={styles.spotBtn}
+                onPress={() => void takeCurrentSpot()}
+                disabled={spotBusy}
+                accessibilityRole="button"
+                accessibilityLabel="Use my current location as pickup spot"
+              >
+                {spotBusy ? (
+                  <ActivityIndicator size="small" color={Colors.green || '#2e7d32'} />
+                ) : (
+                  <Ionicons name="navigate" size={14} color={Colors.green || '#2e7d32'} />
+                )}
+                <Text style={styles.spotBtnText}>Use current location</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.spotBtn} onPress={() => setPickingSpot(true)} accessibilityRole="button" accessibilityLabel="Pick pickup spot on map">
+                <Ionicons name="map-outline" size={14} color={Colors.green || '#2e7d32'} />
+                <Text style={styles.spotBtnText}>{spot ? 'Adjust on map' : 'Pick on map'}</Text>
+              </TouchableOpacity>
+              {spot ? (
+                <TouchableOpacity style={styles.spotBtn} onPress={() => setSpot(null)} accessibilityRole="button" accessibilityLabel="Remove pickup spot">
+                  <Text style={[styles.spotBtnText, { color: Colors.rose }]}>Remove</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+            {spotNote ? <Text style={styles.errorText}>{spotNote}</Text> : null}
+          </View>
+          <SpotPicker
+            visible={pickingSpot}
+            start={pickerStart}
+            onCancel={() => setPickingSpot(false)}
+            onConfirm={(p) => {
+              setSpot(p);
+              setSpotNote(null);
+              setPickingSpot(false);
+            }}
+          />
 
           {/* Replacement value */}
           <View style={styles.field}>
@@ -559,6 +684,15 @@ const styles = StyleSheet.create({
   },
   guidelinesText: { flex: 1, fontSize: Typography.sizes.xs, color: Colors.greenDark || '#1b5e20', lineHeight: 16, fontWeight: Typography.weights.semibold },
   submitBtn: { borderRadius: Radii.lg, overflow: 'hidden', ...Shadows.md },
+  spotHelp: { fontSize: Typography.sizes.xs, color: Colors.slate, marginBottom: Spacing.sm, lineHeight: 16 },
+  spotStatus: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: Spacing.sm },
+  spotStatusText: { flex: 1, fontSize: Typography.sizes.sm, color: Colors.navyMid, fontWeight: Typography.weights.semibold },
+  spotActions: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm },
+  spotBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: Colors.fog, borderRadius: Radii.full,
+    paddingHorizontal: Spacing.md, paddingVertical: 6,
+  },
+  spotBtnText: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.semibold, color: Colors.greenDark || '#1b5e20' },
   submitBtnBusy: { opacity: 0.7 },
   submitGrad: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: Spacing.sm, paddingVertical: Spacing.base },
   submitText: { fontSize: Typography.sizes.md, fontWeight: Typography.weights.bold, color: Colors.white },

@@ -86,7 +86,7 @@ export type PhoneStartResult =
 export type ListingCategory = 'tools' | 'electronics' | 'home' | 'outdoor' | 'kitchen' | 'sports' | 'books' | 'other';
 export type ListingCondition = 'excellent' | 'good' | 'fair';
 export type ListingAvailability = 'available' | 'unavailable';
-export type ListingSort = 'newest' | 'oldest' | 'title';
+export type ListingSort = 'newest' | 'oldest' | 'title' | 'distance';
 
 export interface ListingImage {
   id: string;
@@ -106,6 +106,12 @@ export interface Listing {
   replacementValuePkr: number | null;
   borrowingTerms: string | null;
   area: string | null;
+  city: string | null;
+  // Public pickup point, deliberately displaced about 0.5 km from where the
+  // owner set it. Null when the owner has not set one.
+  approximateLocation: GeoPoint | null;
+  // Distance from the search origin, to 0.1 km; nearby searches only.
+  distanceKm: number | null;
   availability: ListingAvailability;
   teachMeEnabled: boolean;
   tags: string[];
@@ -123,6 +129,7 @@ export interface ListingInput {
   replacementValuePkr?: number | null;
   borrowingTerms?: string | null;
   area?: string | null;
+  city?: string | null;
   availability?: ListingAvailability;
   teachMeEnabled?: boolean;
   tags?: string[];
@@ -133,16 +140,36 @@ export interface ListingQuery {
   category?: ListingCategory;
   condition?: ListingCondition;
   availability?: ListingAvailability;
-  owner?: 'me';
+  // 'me': the caller's own listings. 'others': everyone else's (browsing);
+  // the server takes "who am I" from the token.
+  owner?: 'me' | 'others';
   includeArchived?: boolean;
+  // Nearby (lat and lng together, radiusKm 0.5-50, default 3) or city-wide.
+  lat?: number;
+  lng?: number;
+  radiusKm?: number;
+  city?: string;
   sort?: ListingSort;
   page?: number;
   pageSize?: number;
 }
 
+export interface GeoPoint {
+  latitude: number;
+  longitude: number;
+}
+
+// The precise pickup point; returned to the listing's owner only.
+export interface PickupLocation extends GeoPoint {
+  updatedAt: string;
+}
+
+export type ListingScope = { mode: 'nearby'; radiusKm: number } | { mode: 'city'; city: string } | { mode: 'all' };
+
 export interface ListingPage {
   items: Listing[];
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
+  scope?: ListingScope;
 }
 
 export type ImageUploadType = 'image/jpeg' | 'image/png' | 'image/webp';
@@ -221,6 +248,35 @@ export interface MessagePage {
   nextCursor: string | null;
 }
 
+// Activity (/activity). Source: backend/src/activity/activity.ts.
+export type ActivityType =
+  | 'request_received'
+  | 'request_sent'
+  | 'request_accepted'
+  | 'request_declined'
+  | 'request_cancelled'
+  | 'message'
+  | 'listing_created'
+  | 'listing_archived';
+
+export interface ActivityItem {
+  id: string;
+  type: ActivityType;
+  occurredAt: string;
+  actor: { id: string; displayName: string | null; isYou: boolean } | null;
+  listing: { id: string; title: string; imageUrl: string | null } | null;
+  request: { id: string; status: BorrowStatus; startDate: string; endDate: string; viewerRole: BorrowRole } | null;
+  conversationId: string | null;
+  preview: string | null;
+}
+
+export interface ActivityFeed {
+  // Newest first.
+  items: ActivityItem[];
+  // Parts the server could not read this time; the rest is still returned.
+  unavailable: ('borrowRequests' | 'conversations' | 'listings')[];
+}
+
 // Codes the backend documents (backend/docs/API.md#error-codes), plus codes
 // this client produces itself when no usable response arrives.
 export type ApiErrorCode =
@@ -271,6 +327,7 @@ export type ApiErrorCode =
   | 'EMPTY_IMAGE'
   | 'STORAGE_NOT_CONFIGURED'
   | 'STORAGE_UNAVAILABLE'
+  | 'INVALID_LOCATION'
   // Borrow requests
   | 'BORROW_REQUEST_NOT_FOUND'
   | 'CANNOT_BORROW_OWN_LISTING'

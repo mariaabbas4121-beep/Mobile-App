@@ -11,7 +11,7 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.neighborshare.app",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "NeighborShare needs your location to show nearby items.",
+        "NSLocationWhenInUseUsageDescription": "NeighborShare uses your location only while the app is open, to show items near you and, if you choose, to set where an item can be collected. It is never shown to other people.",
         "NSCameraUsageDescription": "NeighborShare uses the camera to scan QR codes.",
         "NSPhotoLibraryUsageDescription": "NeighborShare lets you pick photos for item listings."
       }
@@ -37,7 +37,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Show current location on map."
+          "locationWhenInUsePermission": "NeighborShare uses your location only while the app is open, to show items near you and, if you choose, to set where an item can be collected. It is never shown to other people."
         }
       ],
       [
