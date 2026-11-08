@@ -248,6 +248,75 @@ export interface MessagePage {
   nextCursor: string | null;
 }
 
+// Pickup and handover (/borrow-requests/:id/...). Source:
+// backend/src/handover/handover.types.ts. The pickup code appears only in
+// CreatedPickupAuthorization, once.
+export type PickupAuthorizationStatus = 'active' | 'redeemed' | 'revoked' | 'expired';
+export type HandoverMethod = 'personal' | 'authorized';
+
+export interface PickupAuthorization {
+  id: string;
+  borrowRequestId: string;
+  operation: 'pickup';
+  status: PickupAuthorizationStatus;
+  recipientName: string;
+  recipientPhone: string | null;
+  note: string | null;
+  expiresAt: string;
+  createdAt: string;
+  revokedAt: string | null;
+  redeemedAt: string | null;
+}
+
+export interface HandoverPhoto {
+  id: string;
+  // Signed URL valid for about an hour; null if the server could not sign it.
+  url: string | null;
+  contentType: string;
+  createdAt: string;
+}
+
+export interface Handover {
+  id: string;
+  method: HandoverMethod;
+  authorizationId: string | null;
+  recipientName: string | null;
+  recipientPhone: string | null;
+  conditionNotes: string | null;
+  confirmedAt: string;
+  confirmedBy: { id: string; displayName: string | null };
+  photos: HandoverPhoto[];
+}
+
+export interface HandoverState {
+  borrowRequestId: string;
+  requestStatus: BorrowStatus;
+  status: 'pending' | 'completed';
+  handover: Handover | null;
+  // Newest first.
+  authorizations: PickupAuthorization[];
+  activeAuthorization: PickupAuthorization | null;
+}
+
+export interface PickupAuthorizationInput {
+  recipientName: string;
+  recipientPhone?: string | null;
+  note?: string | null;
+}
+
+export interface CreatedPickupAuthorization {
+  authorization: PickupAuthorization;
+  // The one-time code. Shown once; only its hash is stored on the server.
+  code: string;
+  displayCode: string;
+  // What the QR encodes.
+  qrPayload: string;
+}
+
+export type HandoverConfirmation =
+  | { method: 'personal'; conditionNotes?: string | null }
+  | { method: 'authorized'; code: string; conditionNotes?: string | null };
+
 // Activity (/activity). Source: backend/src/activity/activity.ts.
 export type ActivityType =
   | 'request_received'
@@ -257,7 +326,11 @@ export type ActivityType =
   | 'request_cancelled'
   | 'message'
   | 'listing_created'
-  | 'listing_archived';
+  | 'listing_archived'
+  | 'pickup_authorized'
+  | 'pickup_authorization_revoked'
+  | 'pickup_authorization_redeemed'
+  | 'item_handed_over';
 
 export interface ActivityItem {
   id: string;
@@ -268,13 +341,16 @@ export interface ActivityItem {
   request: { id: string; status: BorrowStatus; startDate: string; endDate: string; viewerRole: BorrowRole } | null;
   conversationId: string | null;
   preview: string | null;
+  // Pickup events only.
+  recipientName: string | null;
+  handoverMethod: HandoverMethod | null;
 }
 
 export interface ActivityFeed {
   // Newest first.
   items: ActivityItem[];
   // Parts the server could not read this time; the rest is still returned.
-  unavailable: ('borrowRequests' | 'conversations' | 'listings')[];
+  unavailable: ('borrowRequests' | 'conversations' | 'listings' | 'handovers')[];
 }
 
 // Codes the backend documents (backend/docs/API.md#error-codes), plus codes
@@ -341,6 +417,18 @@ export type ApiErrorCode =
   | 'CHAT_NOT_AVAILABLE'
   | 'CLIENT_ID_REUSED'
   | 'INVALID_MESSAGE'
+  // Pickup and handover
+  | 'REQUEST_NOT_ACCEPTED'
+  | 'ALREADY_HANDED_OVER'
+  | 'ACTIVE_AUTHORIZATION_EXISTS'
+  | 'AUTHORIZATION_NOT_ACTIVE'
+  | 'INVALID_PICKUP_CODE'
+  | 'AUTHORIZATION_REVOKED'
+  | 'AUTHORIZATION_ALREADY_USED'
+  | 'AUTHORIZATION_EXPIRED'
+  | 'HANDOVER_NOT_CONFIRMED'
+  | 'EVIDENCE_LIMIT_REACHED'
+  | 'EVIDENCE_WINDOW_CLOSED'
   // Client-side
   | 'NETWORK_ERROR'
   | 'TIMEOUT'

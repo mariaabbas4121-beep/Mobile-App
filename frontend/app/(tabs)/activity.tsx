@@ -5,6 +5,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useBorrowRequests } from '../../context/BorrowRequestsContext';
 import { useListings } from '../../context/ListingsContext';
+import { useChat } from '../../context/ChatContext';
 import { ACTIVITY_ICONS, activityDates, describeActivity, unavailableNote } from '../../lib/activity/describe';
 import type { ActivityFeed, ActivityItem } from '../../lib/api/types';
 import { errorMessage } from '../../lib/auth/messages';
@@ -53,6 +54,8 @@ export default function ActivityScreen() {
   const router = useRouter();
   const { activity, revision: requestRevision } = useBorrowRequests();
   const { revision: listingRevision } = useListings();
+  // Pickup changes made on the other participant's device.
+  const { handoverRevision } = useChat();
   const [feed, setFeed] = useState<ActivityFeed | null>(null);
   const [status, setStatus] = useState<Status>('loading');
   const [error, setError] = useState<unknown>(null);
@@ -85,7 +88,7 @@ export default function ActivityScreen() {
   statusRef.current = status;
   useEffect(() => {
     void load(statusRef.current === 'ready' ? 'quiet' : 'initial');
-  }, [load, requestRevision, listingRevision]);
+  }, [load, requestRevision, listingRevision, handoverRevision]);
 
   // Catch up with messages and decisions made elsewhere when coming back.
   const firstFocus = useRef(true);
@@ -103,7 +106,7 @@ export default function ActivityScreen() {
     if (item.type === 'message' && item.conversationId) {
       router.push(`/chat/${item.conversationId}`);
     } else if (item.request) {
-      router.push({ pathname: '/requests', params: { tab: item.request.viewerRole === 'lender' ? 'lending' : 'borrowing' } });
+      router.push(`/requests/${item.request.id}`);
     } else if (item.listing && item.type !== 'listing_archived') {
       router.push(`/item/${item.listing.id}`);
     }

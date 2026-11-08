@@ -25,6 +25,9 @@ import { inclusiveDays, rangesOverlap } from '../src/borrow/dates.js';
 import type { ChatMessage, ChatRepository, Conversation } from '../src/chat/chat.types.js';
 import { createChatEvents, createChatService } from '../src/chat/chat.service.js';
 import { DEFAULT_RATE_LIMITS } from '../src/middleware/rate-limit.middleware.js';
+import type { HandoverEvent, HandoverMethod, HandoverRepository, PickupAuthorization } from '../src/handover/handover.types.js';
+import { handoverError } from '../src/handover/supabase-handover.repository.js';
+import { createHandoverEvents } from '../src/handover/handover.service.js';
 
 // Fake, syntactically valid configuration for unit tests. It points at an
 // unroutable host and contains no real key.
@@ -42,6 +45,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     },
     auth: { emailRedirectUrl: undefined, oauthRedirectUrl: undefined },
     phoneVerification: { resendCooldownSeconds: 60, otpLength: 6, allowedCountryCodes: [] },
+    handover: { authorizationTtlHours: 24 },
     ...overrides,
   };
 }
@@ -498,6 +502,234 @@ export function memoryBorrowRequests(listings: ReturnType<typeof memoryListings>
   return repo;
 }
 
+// --- Handover fakes --------------------------------------------------------
+// In-memory stand-in with the rules of 20261108120000_pickup_handover.sql:
+// participants only, the borrower authorizes, the lender verifies and
+// confirms, accepted requests only, one active authorization, codes found
+// by hash, single use, expiry, one handover per request, evidence by the
+// confirming lender within 24 hours (at most 5). Each operation's checks
+// and writes run without an await in between, so they are atomic here as
+// the locked database functions are.
+export function memoryHandovers(listings: ReturnType<typeof memoryListings>, borrowRequests: ReturnType<typeof memoryBorrowRequests>) {
+  interface AuthRow {
+    id: string;
+    requestId: string;
+    borrowerId: string;
+    recipientName: string;
+    recipientPhone: string | null;
+    note: string | null;
+    tokenHash: string;
+    status: 'active' | 'redeemed' | 'revoked' | 'expired';
+    expiresAt: number;
+    createdAt: number;
+    revokedAt: number | null;
+    redeemedAt: number | null;
+  }
+  interface HandoverRow {
+    id: string;
+    requestId: string;
+    method: HandoverMethod;
+    authorizationId: string | null;
+    recipientName: string | null;
+    recipientPhone: string | null;
+    confirmedBy: string;
+    conditionNotes: string | null;
+    confirmedAt: number;
+    photos: { id: string; path: string; contentType: string; createdAt: number }[];
+  }
+  const authorizations = new Map<string, AuthRow>();
+  const handovers = new Map<string, HandoverRow>();
+  const events: { id: number; requestId: string; authorizationId: string | null; actorId: string; kind: HandoverEvent['kind']; at: number }[] = [];
+  let seq = 0;
+  const id = (group: string) => `00000000-0000-4000-${group}-${String(++seq).padStart(12, '0')}`;
+  let clock = Date.now();
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const fail = (code: string): never => {
+    throw handoverError(code)!;
+  };
+
+  const statusOf = (a: AuthRow) => (a.status === 'active' && a.expiresAt <= clock ? 'expired' : a.status);
+  const toAuth = (a: AuthRow): PickupAuthorization => ({
+    id: a.id,
+    borrowRequestId: a.requestId,
+    operation: 'pickup',
+    status: statusOf(a),
+    recipientName: a.recipientName,
+    recipientPhone: a.recipientPhone,
+    note: a.note,
+    expiresAt: iso(a.expiresAt),
+    createdAt: iso(a.createdAt),
+    revokedAt: a.revokedAt === null ? null : iso(a.revokedAt),
+    redeemedAt: a.redeemedAt === null ? null : iso(a.redeemedAt),
+  });
+  const event = (requestId: string, authorizationId: string | null, actorId: string, kind: HandoverEvent['kind']) =>
+    events.push({ id: events.length + 1, requestId, authorizationId, actorId, kind, at: (clock += 1) });
+
+  // Like handover_request_for(): participant, role, accepted, not handed over.
+  const requestFor = (caller: Caller, requestId: string, role: 'borrower' | 'lender') => {
+    const r = borrowRequests.rows.get(requestId);
+    if (!r || (r.borrowerId !== caller.userId && r.lenderId !== caller.userId)) fail('NSH01');
+    if ((role === 'borrower' ? r!.borrowerId : r!.lenderId) !== caller.userId) fail('42501');
+    if (r!.status !== 'accepted') fail('NSH03');
+    if (handovers.has(requestId)) fail('NSH04');
+    return r!;
+  };
+  const usable = (requestId: string, tokenHash: string) => {
+    const a = [...authorizations.values()].find((x) => x.tokenHash === tokenHash && x.requestId === requestId);
+    if (!a) return fail('NSH07');
+    const s = statusOf(a);
+    if (s === 'revoked') fail('NSH08');
+    if (s === 'redeemed') fail('NSH09');
+    if (s === 'expired') fail('NSH10');
+    return a;
+  };
+
+  const repo = {
+    authorizations,
+    handovers,
+    events,
+    // Moves the fake's clock (for expiry and the evidence window).
+    advance(ms: number) {
+      clock += ms;
+    },
+    getState: vi.fn<HandoverRepository['getState']>(async (caller, requestId) => {
+      const r = borrowRequests.rows.get(requestId);
+      if (!r || (r.borrowerId !== caller.userId && r.lenderId !== caller.userId)) return null;
+      const h = handovers.get(requestId);
+      const auths = [...authorizations.values()].filter((a) => a.requestId === requestId).reverse().map(toAuth);
+      return {
+        borrowRequestId: requestId,
+        requestStatus: r.status,
+        status: h ? 'completed' : 'pending',
+        handover: h
+          ? {
+              id: h.id,
+              method: h.method,
+              authorizationId: h.authorizationId,
+              recipientName: h.recipientName,
+              recipientPhone: h.recipientPhone,
+              conditionNotes: h.conditionNotes,
+              confirmedAt: iso(h.confirmedAt),
+              confirmedBy: { id: h.confirmedBy, displayName: 'Lender' },
+              photos: h.photos.map((p) => ({ id: p.id, url: `https://storage.test/signed/${p.path}`, contentType: p.contentType, createdAt: iso(p.createdAt) })),
+            }
+          : null,
+        authorizations: auths,
+        activeAuthorization: auths.find((a) => a.status === 'active') ?? null,
+      };
+    }),
+    createAuthorization: vi.fn<HandoverRepository['createAuthorization']>(async (caller, requestId, input) => {
+      const r = requestFor(caller, requestId, 'borrower');
+      for (const a of authorizations.values()) if (a.requestId === requestId && statusOf(a) === 'expired') a.status = 'expired';
+      if ([...authorizations.values()].some((a) => a.requestId === requestId && a.status === 'active')) fail('NSH05');
+      const a: AuthRow = {
+        id: id('b000'),
+        requestId,
+        borrowerId: r.borrowerId,
+        recipientName: input.recipientName,
+        recipientPhone: input.recipientPhone,
+        note: input.note,
+        tokenHash: input.tokenHash,
+        status: 'active',
+        createdAt: (clock += 1),
+        expiresAt: clock + input.ttlHours * 3_600_000,
+        revokedAt: null,
+        redeemedAt: null,
+      };
+      authorizations.set(a.id, a);
+      event(requestId, a.id, caller.userId, 'authorization_created');
+      return toAuth(a);
+    }),
+    revokeAuthorization: vi.fn<HandoverRepository['revokeAuthorization']>(async (caller, requestId, authorizationId) => {
+      const r = borrowRequests.rows.get(requestId);
+      if (!r || (r.borrowerId !== caller.userId && r.lenderId !== caller.userId)) fail('NSH01');
+      if (r!.borrowerId !== caller.userId) fail('42501');
+      const a = authorizations.get(authorizationId);
+      if (!a || a.requestId !== requestId) return fail('NSH01');
+      if (statusOf(a) !== 'active') fail('NSH06');
+      Object.assign(a, { status: 'revoked', revokedAt: (clock += 1) });
+      event(requestId, a.id, caller.userId, 'authorization_revoked');
+      return toAuth(a);
+    }),
+    verifyCode: vi.fn<HandoverRepository['verifyCode']>(async (caller, requestId, tokenHash) => {
+      requestFor(caller, requestId, 'lender');
+      return toAuth(usable(requestId, tokenHash));
+    }),
+    confirm: vi.fn<HandoverRepository['confirm']>(async (caller, requestId, input) => {
+      requestFor(caller, requestId, 'lender');
+      const h: HandoverRow = {
+        id: id('c000'),
+        requestId,
+        method: input.method,
+        authorizationId: null,
+        recipientName: null,
+        recipientPhone: null,
+        confirmedBy: caller.userId,
+        conditionNotes: input.conditionNotes,
+        confirmedAt: (clock += 1),
+        photos: [],
+      };
+      if (input.method === 'authorized') {
+        const a = usable(requestId, input.tokenHash!);
+        Object.assign(a, { status: 'redeemed', redeemedAt: clock });
+        Object.assign(h, { authorizationId: a.id, recipientName: a.recipientName, recipientPhone: a.recipientPhone });
+        event(requestId, a.id, caller.userId, 'authorization_redeemed');
+      } else {
+        for (const a of authorizations.values()) {
+          if (a.requestId === requestId && statusOf(a) === 'active') {
+            Object.assign(a, { status: 'revoked', revokedAt: clock });
+            event(requestId, a.id, caller.userId, 'authorization_revoked');
+          }
+        }
+      }
+      handovers.set(requestId, h);
+      event(requestId, h.authorizationId, caller.userId, 'handover_confirmed');
+      return h.id;
+    }),
+    addPhoto: vi.fn<HandoverRepository['addPhoto']>(async (caller, requestId, handoverId, file) => {
+      const h = handovers.get(requestId);
+      if (!h || h.id !== handoverId) return fail('NSH01');
+      if (h.confirmedBy !== caller.userId) fail('42501');
+      if (h.confirmedAt <= clock - 24 * 3_600_000) fail('NSH12');
+      if (h.photos.length >= 5) fail('NSH11');
+      const photo = { id: id('d000'), path: `${requestId}/${handoverId}/${seq}.jpg`, contentType: file.contentType, createdAt: (clock += 1) };
+      h.photos.push(photo);
+      return { id: photo.id, url: `https://storage.test/signed/${photo.path}`, contentType: photo.contentType, createdAt: iso(photo.createdAt) };
+    }),
+    listEvents: vi.fn<HandoverRepository['listEvents']>(async (caller, limit) =>
+      events
+        .filter((e) => {
+          const r = borrowRequests.rows.get(e.requestId);
+          return r && (r.borrowerId === caller.userId || r.lenderId === caller.userId);
+        })
+        .reverse()
+        .slice(0, limit)
+        .map((e): HandoverEvent => {
+          const r = borrowRequests.rows.get(e.requestId)!;
+          const l = listings.rows.get(r.listingId)!;
+          const a = e.authorizationId ? authorizations.get(e.authorizationId) : undefined;
+          return {
+            id: String(e.id),
+            kind: e.kind,
+            createdAt: iso(e.at),
+            actor: { id: e.actorId, displayName: e.actorId === r.lenderId ? 'Lender' : 'Borrower' },
+            recipientName: a?.recipientName ?? null,
+            method: e.kind === 'handover_confirmed' ? (handovers.get(e.requestId)?.method ?? null) : null,
+            request: {
+              id: r.id,
+              status: r.status,
+              startDate: r.startDate,
+              endDate: r.endDate,
+              viewerRole: r.borrowerId === caller.userId ? 'borrower' : 'lender',
+            },
+            listing: { id: l.id, title: l.title, imageUrl: null },
+          };
+        }),
+    ),
+  };
+  return repo;
+}
+
 // --- Chat fakes ------------------------------------------------------------
 // In-memory stand-in with the migration's rules: a conversation exists for
 // each accepted request (as the accept trigger creates it), participants
@@ -625,6 +857,8 @@ export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPoli
   const borrowRequests = memoryBorrowRequests(listings);
   const chatRepository = memoryChat(listings, borrowRequests);
   const chatEvents = createChatEvents(silentLogger);
+  const handovers = memoryHandovers(listings, borrowRequests);
+  const handoverEvents = createHandoverEvents(silentLogger);
   const chat = createChatService({
     repository: chatRepository,
     profiles,
@@ -647,8 +881,10 @@ export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPoli
     listings,
     borrowRequests,
     chat,
+    handovers,
+    handoverEvents,
     ...(overrides.now ? { now: overrides.now } : {}),
     ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
   });
-  return { app, gateway, profiles, phoneAuth, phoneStore, listings, borrowRequests, chat, chatRepository, chatEvents };
+  return { app, gateway, profiles, phoneAuth, phoneStore, listings, borrowRequests, chat, chatRepository, chatEvents, handovers, handoverEvents };
 }

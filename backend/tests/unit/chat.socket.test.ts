@@ -50,6 +50,7 @@ async function start(now?: () => number) {
     gateway: t.gateway,
     chat: t.chat,
     events: t.chatEvents,
+    handoverEvents: t.handoverEvents,
     ...(now ? { now } : {}),
   });
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -147,6 +148,23 @@ describe('authentication', () => {
     const gone = new Promise<string>((resolve) => c.once('disconnect', resolve));
     await expired;
     expect(await gone).toBe('io server disconnect');
+  });
+});
+
+describe('handover hints', () => {
+  test('both participants are told a request’s pickup changed, with no details; others hear nothing', async () => {
+    const { requestId } = await acceptedConversation();
+    const [b, l, o] = [await connected(OTHER_TOKEN), await connected(VALID_TOKEN), await connected(THIRD_TOKEN)];
+    const [forBorrower, forLender, forOutsider] = [collect(b, 'handover:updated'), collect(l, 'handover:updated'), collect(o, 'handover:updated')];
+    const created = await request(t.app)
+      .post(`/api/v1/borrow-requests/${requestId}/pickup-authorizations`)
+      .set(asBorrower)
+      .send({ recipientName: 'Ali Khan', confirm: true });
+    expect(created.status).toBe(201);
+    await settle();
+    expect(forBorrower).toEqual([{ borrowRequestId: requestId }]);
+    expect(forLender).toEqual([{ borrowRequestId: requestId }]);
+    expect(forOutsider).toEqual([]);
   });
 });
 

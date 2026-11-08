@@ -25,6 +25,22 @@ export function describeActivity(item: ActivityItem): string {
       return `You listed ${title}`;
     case 'listing_archived':
       return `You archived ${title}`;
+    case 'pickup_authorized':
+      return you
+        ? `You authorized ${item.recipientName ?? 'someone'} to collect ${title}`
+        : `${who(item)} authorized ${item.recipientName ?? 'someone'} to collect ${title}`;
+    case 'pickup_authorization_revoked':
+      return you
+        ? `You revoked ${item.recipientName ?? 'a'}’s pickup authorization for ${title}`
+        : `${who(item)} revoked ${item.recipientName ?? 'a'}’s pickup authorization for ${title}`;
+    case 'pickup_authorization_redeemed':
+      return `${item.recipientName ?? 'The authorized person'}’s pickup code was used for ${title}`;
+    case 'item_handed_over':
+      return you
+        ? `You handed over ${title}${item.handoverMethod === 'authorized' && item.recipientName ? ` to ${item.recipientName}` : ''}`
+        : `${who(item)} handed over ${title}${
+            item.handoverMethod === 'authorized' && item.recipientName ? ` to ${item.recipientName}` : ' to you'
+          }`;
   }
 }
 
@@ -40,12 +56,17 @@ export const ACTIVITY_ICONS: Record<ActivityItem['type'], { icon: string; color:
   message: { icon: 'chatbubble-ellipses-outline', color: '#0f766e' },
   listing_created: { icon: 'pricetag-outline', color: '#1b5e20' },
   listing_archived: { icon: 'archive-outline', color: '#64748b' },
+  pickup_authorized: { icon: 'qr-code-outline', color: '#1d4ed8' },
+  pickup_authorization_revoked: { icon: 'ban-outline', color: '#b91c1c' },
+  pickup_authorization_redeemed: { icon: 'scan-outline', color: '#0f766e' },
+  item_handed_over: { icon: 'cube-outline', color: '#2e7d32' },
 };
 
 const SOURCE_NAMES: Record<ActivityFeed['unavailable'][number], string> = {
   borrowRequests: 'borrow requests',
   conversations: 'messages',
   listings: 'your listings',
+  handovers: 'pickups',
 };
 
 export function unavailableNote(feed: ActivityFeed): string | null {

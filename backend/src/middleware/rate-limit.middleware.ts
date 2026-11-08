@@ -34,6 +34,11 @@ export interface RateLimitPolicy {
   borrowRequestCreatePerUser: LimitRule;
   // Chat messages, over REST and the socket together (see chat.service.ts).
   chatMessagePerUser: LimitRule;
+  // Pickup: creating authorizations, checking and redeeming codes (shared
+  // by verify and confirm, so codes cannot be tried quickly), evidence photos.
+  pickupAuthorizePerUser: LimitRule;
+  pickupVerifyPerUser: LimitRule;
+  handoverPhotoUploadPerUser: LimitRule;
 }
 
 const MINUTE = 60_000;
@@ -57,6 +62,9 @@ export const DEFAULT_RATE_LIMITS: RateLimitPolicy = {
   listingLocationPerUser: { windowMs: 60 * MINUTE, limit: 60 },
   borrowRequestCreatePerUser: { windowMs: 60 * MINUTE, limit: 20 },
   chatMessagePerUser: { windowMs: MINUTE, limit: 30 },
+  pickupAuthorizePerUser: { windowMs: 60 * MINUTE, limit: 20 },
+  pickupVerifyPerUser: { windowMs: 15 * MINUTE, limit: 30 },
+  handoverPhotoUploadPerUser: { windowMs: 60 * MINUTE, limit: 30 },
 };
 
 const hashKey = (prefix: string, value: string) => `${prefix}:${createHash('sha256').update(value).digest('base64url')}`;
@@ -174,6 +182,20 @@ export interface BorrowLimiters {
 export function createBorrowLimiters(policy: RateLimitPolicy = DEFAULT_RATE_LIMITS): BorrowLimiters {
   return {
     createPerUser: createLimiter({ name: 'borrow-create-user', rule: policy.borrowRequestCreatePerUser, key: 'user' }),
+  };
+}
+
+export interface HandoverLimiters {
+  authorizePerUser: RequestHandler;
+  verifyPerUser: RequestHandler;
+  photoUploadPerUser: RequestHandler;
+}
+
+export function createHandoverLimiters(policy: RateLimitPolicy = DEFAULT_RATE_LIMITS): HandoverLimiters {
+  return {
+    authorizePerUser: createLimiter({ name: 'pickup-authorize-user', rule: policy.pickupAuthorizePerUser, key: 'user' }),
+    verifyPerUser: createLimiter({ name: 'pickup-verify-user', rule: policy.pickupVerifyPerUser, key: 'user' }),
+    photoUploadPerUser: createLimiter({ name: 'handover-photo-user', rule: policy.handoverPhotoUploadPerUser, key: 'user' }),
   };
 }
 

@@ -17,6 +17,7 @@ import { errorHandler, notFound } from './middleware/error.middleware.js';
 import {
   createAuthLimiters,
   createBorrowLimiters,
+  createHandoverLimiters,
   createListingLimiters,
   createPhoneLimiters,
   DEFAULT_RATE_LIMITS,
@@ -34,6 +35,10 @@ import { unconfiguredChatService, type ChatService } from './chat/chat.service.j
 import { conversationRoutes } from './routes/conversation.routes.js';
 import { activityRoutes } from './routes/activity.routes.js';
 import { createActivityService } from './activity/activity.js';
+import { handoverRoutes } from './routes/handover.routes.js';
+import type { HandoverRepository } from './handover/handover.types.js';
+import { unconfiguredHandovers } from './handover/supabase-handover.repository.js';
+import { createHandoverEvents, createHandoverService, type HandoverEvents } from './handover/handover.service.js';
 
 export interface AppDeps {
   config: Config;
@@ -49,6 +54,11 @@ export interface AppDeps {
   // Shared with the Socket.IO server (src/realtime/chat.socket.ts). Absent:
   // the chat endpoints answer 503 SERVER_NOT_CONFIGURED.
   chat?: ChatService;
+  // Absent: the pickup/handover endpoints answer 503 SERVER_NOT_CONFIGURED.
+  handovers?: HandoverRepository;
+  // Shared with the Socket.IO server, which tells both participants when a
+  // handover changes.
+  handoverEvents?: HandoverEvents;
   // Clock for date rules (tests pin it).
   now?: () => number;
   rateLimits?: RateLimitPolicy;
@@ -63,6 +73,8 @@ export function createApp({
   listings = unconfiguredListings(),
   borrowRequests = unconfiguredBorrowRequests(),
   chat = unconfiguredChatService(profiles, logger),
+  handovers = unconfiguredHandovers(),
+  handoverEvents = createHandoverEvents(logger),
   now = Date.now,
   rateLimits = DEFAULT_RATE_LIMITS,
 }: AppDeps) {
@@ -145,10 +157,23 @@ export function createApp({
     '/api/v1/borrow-requests',
     borrowRequestRoutes({ gateway: authGateway, profiles, listings, borrowRequests, limiters: createBorrowLimiters(rateLimits), now }),
   );
+  app.use(
+    '/api/v1/borrow-requests',
+    handoverRoutes({
+      gateway: authGateway,
+      handovers: createHandoverService({
+        repository: handovers,
+        borrowRequests,
+        events: handoverEvents,
+        authorizationTtlHours: config.handover.authorizationTtlHours,
+      }),
+      limiters: createHandoverLimiters(rateLimits),
+    }),
+  );
   app.use('/api/v1/conversations', conversationRoutes({ gateway: authGateway, chat }));
   app.use(
     '/api/v1/activity',
-    activityRoutes({ gateway: authGateway, activity: createActivityService({ listings, borrowRequests, chat, logger }) }),
+    activityRoutes({ gateway: authGateway, activity: createActivityService({ listings, borrowRequests, chat, handovers, logger }) }),
   );
   app.use('/api/v1/items', listingRoutes({ gateway: authGateway, profiles, listings, limiters: createListingLimiters(rateLimits) }));
 

@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react-nativ
 import { AuthProvider } from '../context/AuthContext';
 import { ListingsProvider } from '../context/ListingsContext';
 import { BorrowRequestsProvider } from '../context/BorrowRequestsContext';
+import { ChatProvider } from '../context/ChatContext';
 import ActivityScreen from '../app/(tabs)/activity';
 import MyListingsScreen from '../app/listings/mine';
 import type { ApiClient } from '../lib/api/client';
@@ -26,7 +27,9 @@ async function renderWith(element: React.ReactElement, api = fakeApi()) {
   await render(
     <AuthProvider services={s.asServices}>
       <ListingsProvider services={svc}>
-        <BorrowRequestsProvider services={svc}>{element}</BorrowRequestsProvider>
+        <BorrowRequestsProvider services={svc}>
+          <ChatProvider services={{ ...svc, socket: null, newId: () => 'id' }}>{element}</ChatProvider>
+        </BorrowRequestsProvider>
       </ListingsProvider>
     </AuthProvider>,
   );
@@ -44,6 +47,8 @@ const event = (over: Partial<ActivityItem>): ActivityItem => ({
   request,
   conversationId: null,
   preview: null,
+  recipientName: null,
+  handoverMethod: null,
   ...over,
 });
 
@@ -90,7 +95,7 @@ describe('Activity screen', () => {
     await fireEvent.press(screen.getByRole('button', { name: 'Ahmed sent you a message about Camping tent' }));
     expect(mockRouter.push).toHaveBeenCalledWith('/chat/c1');
     await fireEvent.press(screen.getByRole('button', { name: 'You accepted a request for Camping tent' }));
-    expect(mockRouter.push).toHaveBeenCalledWith({ pathname: '/requests', params: { tab: 'lending' } });
+    expect(mockRouter.push).toHaveBeenCalledWith(`/requests/${request.id}`);
     await fireEvent.press(screen.getByRole('button', { name: 'You listed Camping tent' }));
     expect(mockRouter.push).toHaveBeenCalledWith('/item/l1');
   });

@@ -63,6 +63,7 @@ export class ChatConnection {
   private readonly stateListeners = new Set<(state: ConnectionState) => void>();
   private readonly messageListeners = new Set<(conversationId: string, message: ChatMessage) => void>();
   private readonly updateListeners = new Set<(conversationId: string) => void>();
+  private readonly handoverListeners = new Set<(borrowRequestId: string) => void>();
   // Rooms to (re)join on every connect.
   private readonly rooms = new Map<string, number>();
   private refreshedAfterRefusal = false;
@@ -93,6 +94,12 @@ export class ChatConnection {
   onConversationUpdated(listener: (conversationId: string) => void): () => void {
     this.updateListeners.add(listener);
     return () => this.updateListeners.delete(listener);
+  }
+
+  // Content-free hint that a borrow request's pickup state changed.
+  onHandoverUpdated(listener: (borrowRequestId: string) => void): () => void {
+    this.handoverListeners.add(listener);
+    return () => this.handoverListeners.delete(listener);
   }
 
   start(): void {
@@ -152,6 +159,9 @@ export class ChatConnection {
     });
     socket.on('conversation:updated', (payload: { conversationId: string }) => {
       for (const l of this.updateListeners) l(payload.conversationId);
+    });
+    socket.on('handover:updated', (payload: { borrowRequestId: string }) => {
+      for (const l of this.handoverListeners) l(payload.borrowRequestId);
     });
     socket.connect();
   }

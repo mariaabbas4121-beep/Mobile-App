@@ -1,6 +1,13 @@
 import type {
   ActivityFeed,
   ApiErrorCode,
+  CreatedPickupAuthorization,
+  Handover,
+  HandoverConfirmation,
+  HandoverPhoto,
+  HandoverState,
+  PickupAuthorization,
+  PickupAuthorizationInput,
   BorrowRequest,
   BorrowRequestInput,
   BorrowRequestPage,
@@ -320,6 +327,40 @@ export function createApiClient({
       }),
     markConversationRead: (accessToken: string, id: string) =>
       request<{ conversation: Conversation }>({ method: 'POST', path: `/conversations/${encodeURIComponent(id)}/read`, body: {}, accessToken }),
+
+    // Pickup and handover. The code travels only in request bodies.
+    getHandover: (accessToken: string, requestId: string) =>
+      request<{ handover: HandoverState }>({ method: 'GET', path: `/borrow-requests/${encodeURIComponent(requestId)}/handover`, accessToken }),
+    createPickupAuthorization: (accessToken: string, requestId: string, input: PickupAuthorizationInput) =>
+      request<CreatedPickupAuthorization>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/pickup-authorizations`,
+        body: { ...input, confirm: true },
+        accessToken,
+      }),
+    revokePickupAuthorization: (accessToken: string, requestId: string, authorizationId: string) =>
+      request<{ authorization: PickupAuthorization }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/pickup-authorizations/${encodeURIComponent(authorizationId)}/revoke`,
+        body: {},
+        accessToken,
+      }),
+    verifyPickupCode: (accessToken: string, requestId: string, code: string) =>
+      request<{ authorization: PickupAuthorization }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/handover/verify`,
+        body: { code },
+        accessToken,
+      }),
+    confirmHandover: (accessToken: string, requestId: string, confirmation: HandoverConfirmation) =>
+      request<{ handover: Handover }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/handover`,
+        body: { ...confirmation, confirm: true },
+        accessToken,
+      }),
+    uploadHandoverPhoto: (accessToken: string, requestId: string, fileUri: string, contentType: ImageUploadType) =>
+      upload<{ photo: HandoverPhoto }>(`/borrow-requests/${encodeURIComponent(requestId)}/handover/photos`, fileUri, contentType, accessToken),
 
     // The caller's own recent activity, derived on the server from their
     // requests, conversations and listings.

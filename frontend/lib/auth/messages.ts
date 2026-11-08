@@ -100,6 +100,28 @@ export function errorMessage(err: unknown): string {
       return 'This request no longer exists.';
     case 'INVALID_LOCATION':
       return 'That location could not be used. Choose it again.';
+    case 'REQUEST_NOT_ACCEPTED':
+      return 'Pickup is only possible once the owner accepts the request.';
+    case 'ALREADY_HANDED_OVER':
+      return 'This item has already been handed over.';
+    case 'ACTIVE_AUTHORIZATION_EXISTS':
+      return 'Someone is already authorized to collect this item. Revoke that first.';
+    case 'AUTHORIZATION_NOT_ACTIVE':
+      return 'This authorization is no longer active.';
+    case 'INVALID_PICKUP_CODE':
+      return 'This is not a valid pickup code for this item.';
+    case 'AUTHORIZATION_REVOKED':
+      return 'The borrower revoked this pickup authorization. Do not hand over the item.';
+    case 'AUTHORIZATION_ALREADY_USED':
+      return 'This pickup code has already been used.';
+    case 'AUTHORIZATION_EXPIRED':
+      return 'This pickup code has expired. Ask the borrower for a new one.';
+    case 'HANDOVER_NOT_CONFIRMED':
+      return 'Confirm the handover before adding photos.';
+    case 'EVIDENCE_LIMIT_REACHED':
+      return 'At most 5 condition photos can be added.';
+    case 'EVIDENCE_WINDOW_CLOSED':
+      return 'Condition photos can only be added within 24 hours of the handover.';
     case 'CONVERSATION_NOT_FOUND':
       return 'This conversation is not available.';
     case 'CHAT_NOT_AVAILABLE':

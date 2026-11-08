@@ -3,10 +3,11 @@ import type { ChatService } from '../chat/chat.service.js';
 import type { Conversation } from '../chat/chat.types.js';
 import type { Logger } from '../lib/logger.js';
 import type { Caller, Listing, ListingRepository } from '../listings/listing.types.js';
+import type { HandoverEvent, HandoverMethod, HandoverRepository } from '../handover/handover.types.js';
 
 // The caller's recent activity, derived from records they can already read:
-// their borrow requests (both sides), their conversations and their own
-// listings. Every source is queried with the caller's token, so Row-Level
+// their borrow requests (both sides), their conversations, their own
+// listings and their requests' pickup/handover audit trail. Every source is queried with the caller's token, so Row-Level
 // Security decides what is included; nothing is stored and no other user's
 // records can appear. No notification table is involved.
 
@@ -19,10 +20,15 @@ export const ACTIVITY_TYPES = [
   'message', // latest message of a conversation
   'listing_created',
   'listing_archived',
+  // Pickup (Phase 3B.1), from the handover audit trail.
+  'pickup_authorized', // the borrower named someone to collect the item
+  'pickup_authorization_revoked',
+  'pickup_authorization_redeemed', // the lender accepted that person's code
+  'item_handed_over', // the lender confirmed the handover
 ] as const;
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
 
-export const ACTIVITY_SOURCES = ['borrowRequests', 'conversations', 'listings'] as const;
+export const ACTIVITY_SOURCES = ['borrowRequests', 'conversations', 'listings', 'handovers'] as const;
 export type ActivitySource = (typeof ACTIVITY_SOURCES)[number];
 
 export interface ActivityItem {
@@ -37,6 +43,10 @@ export interface ActivityItem {
   conversationId: string | null;
   // Start of the message, for 'message' only.
   preview: string | null;
+  // Pickup events: the person the borrower authorized (participants only
+  // ever see their own requests' events), and how the item was handed over.
+  recipientName: string | null;
+  handoverMethod: HandoverMethod | null;
 }
 
 export interface ActivityFeed {
@@ -57,6 +67,8 @@ function requestEvents(r: BorrowRequest, me: string): ActivityItem[] {
     request: { id: r.id, status: r.status, startDate: r.startDate, endDate: r.endDate, viewerRole: r.viewerRole },
     conversationId: null,
     preview: null,
+    recipientName: null,
+    handoverMethod: null,
   };
   const events: ActivityItem[] = [
     {
@@ -90,6 +102,30 @@ function messageEvent(c: Conversation, me: string): ActivityItem | null {
     request: { id: c.request.id, status: c.request.status, startDate: c.request.startDate, endDate: c.request.endDate, viewerRole: c.viewerRole },
     conversationId: c.id,
     preview: m.body.length > ACTIVITY_PREVIEW_LENGTH ? `${m.body.slice(0, ACTIVITY_PREVIEW_LENGTH - 1)}…` : m.body,
+    recipientName: null,
+    handoverMethod: null,
+  };
+}
+
+const HANDOVER_TYPES: Record<HandoverEvent['kind'], ActivityType> = {
+  authorization_created: 'pickup_authorized',
+  authorization_revoked: 'pickup_authorization_revoked',
+  authorization_redeemed: 'pickup_authorization_redeemed',
+  handover_confirmed: 'item_handed_over',
+};
+
+function handoverEvent(e: HandoverEvent, me: string): ActivityItem {
+  return {
+    id: `handover:${e.id}`,
+    type: HANDOVER_TYPES[e.kind],
+    occurredAt: e.createdAt,
+    actor: party(e.actor, me),
+    listing: e.listing,
+    request: e.request,
+    conversationId: null,
+    preview: null,
+    recipientName: e.recipientName,
+    handoverMethod: e.method,
   };
 }
 
@@ -102,6 +138,8 @@ function listingEvents(l: Listing, me: string): ActivityItem[] {
     request: null,
     conversationId: null,
     preview: null,
+    recipientName: null,
+    handoverMethod: null,
   };
   const events: ActivityItem[] = [{ ...base, id: `listing:${l.id}:created`, type: 'listing_created', occurredAt: l.createdAt }];
   if (l.archivedAt) events.push({ ...base, id: `listing:${l.id}:archived`, type: 'listing_archived', occurredAt: l.archivedAt });
@@ -112,10 +150,11 @@ export interface ActivityDeps {
   listings: ListingRepository;
   borrowRequests: BorrowRequestRepository;
   chat: Pick<ChatService, 'list'>;
+  handovers: Pick<HandoverRepository, 'listEvents'>;
   logger: Logger;
 }
 
-export function createActivityService({ listings, borrowRequests, chat, logger }: ActivityDeps) {
+export function createActivityService({ listings, borrowRequests, chat, handovers, logger }: ActivityDeps) {
   return {
     // Newest first. A source that fails is reported in `unavailable`; if all
     // fail, the first error is thrown.
@@ -140,6 +179,7 @@ export function createActivityService({ listings, borrowRequests, chat, logger }
             .search(caller, { ownerId: me, includeArchived: true, sort: 'newest', ...window })
             .then(({ items }) => items.filter((l) => l.owner.id === me).flatMap((l) => listingEvents(l, me))),
         ],
+        ['handovers', handovers.listEvents(caller, ACTIVITY_SOURCE_WINDOW).then((events) => events.map((e) => handoverEvent(e, me)))],
       ];
 
       const settled = await Promise.allSettled(sources.map(([, p]) => p));

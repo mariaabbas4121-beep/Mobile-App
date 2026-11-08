@@ -76,6 +76,10 @@ const envSchema = z
           .filter(Boolean),
       )
       .pipe(z.array(z.string().regex(/^[1-9][0-9]{0,2}$/, { error: 'must be country calling codes such as 92,971' }))),
+
+    // How long a pickup authorization code (the QR a borrower gives someone
+    // else) stays usable, in hours.
+    PICKUP_AUTHORIZATION_TTL_HOURS: z.preprocess(emptyToUndefined, z.coerce.number().int().min(1).max(168).default(24)),
   })
   .superRefine((env, ctx) => {
     if (env.NODE_ENV === 'production' && !env.SUPABASE_URL.startsWith('https://')) {
@@ -122,6 +126,10 @@ export interface Config {
     otpLength: number;
     // Calling codes without "+"; empty means any.
     allowedCountryCodes: string[];
+  };
+  handover: {
+    // Lifetime of a pickup authorization code, 1-168 hours.
+    authorizationTtlHours: number;
   };
 }
 
@@ -171,6 +179,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       resendCooldownSeconds: e.PHONE_OTP_RESEND_COOLDOWN_SECONDS,
       otpLength: e.PHONE_OTP_LENGTH,
       allowedCountryCodes: e.PHONE_ALLOWED_COUNTRY_CODES,
+    },
+    handover: {
+      authorizationTtlHours: e.PICKUP_AUTHORIZATION_TTL_HOURS,
     },
   };
 }

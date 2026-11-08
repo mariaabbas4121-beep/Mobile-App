@@ -60,6 +60,9 @@ function RootNavigator() {
         <Stack.Screen name="requests/index" options={{ presentation: 'card' }} />
         <Stack.Screen name="chat/[id]" options={{ presentation: 'card' }} />
         <Stack.Screen name="listings/mine" options={{ presentation: 'card' }} />
+        <Stack.Screen name="requests/[id]" options={{ presentation: 'card' }} />
+        <Stack.Screen name="handover/authorize" options={{ presentation: 'modal' }} />
+        <Stack.Screen name="handover/confirm" options={{ presentation: 'modal' }} />
       </Stack.Protected>
     </Stack>
   );

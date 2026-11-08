@@ -10,6 +10,7 @@ This is the contract the mobile app integrates against. Everything here is imple
 - [Listings](#listings): [list](#get-apiv1items), [get](#get-apiv1itemsid), [create](#post-apiv1items), [update](#patch-apiv1itemsid), [archive](#delete-apiv1itemsid), [add photo](#post-apiv1itemsidimages), [remove photo](#delete-apiv1itemsidimagesimageid), [nearby search and pickup spots](#nearby-discovery-and-pickup-locations)
 - [Borrow requests](#borrow-requests): [create](#post-apiv1borrow-requests), [lists](#get-apiv1borrow-requestsoutgoing-and-incoming), [get](#get-apiv1borrow-requestsid), [accept · decline · cancel](#post-apiv1borrow-requestsidaccept--decline--cancel), [booked dates](#get-apiv1itemsidbooked-dates)
 - [Chat](#chat): [list](#get-apiv1conversations), [open](#post-apiv1conversations), [get](#get-apiv1conversationsid), [history](#get-apiv1conversationsidmessages), [send](#post-apiv1conversationsidmessages), [mark read](#post-apiv1conversationsidread), [Socket.IO events](#socketio), [two-device test](#testing-chat-with-two-accounts), [limitations](#known-limitations)
+- [Pickup and handover](#pickup-and-handover): [state](#get-apiv1borrow-requestsidhandover), [authorize](#post-apiv1borrow-requestsidpickup-authorizations), [revoke](#post-apiv1borrow-requestsidpickup-authorizationsauthorizationidrevoke), [verify](#post-apiv1borrow-requestsidhandoververify), [confirm](#post-apiv1borrow-requestsidhandover), [photos](#post-apiv1borrow-requestsidhandoverphotos)
 - [Activity](#activity): [recent activity](#get-apiv1activity)
 - [Email confirmation flow](#email-confirmation-flow)
 - [Error codes](#error-codes)
@@ -773,6 +774,93 @@ Typing indicators are not implemented. Limits: 30 messages per minute per user (
 - Text only: no images or attachments.
 - Messages cannot be edited, deleted or reported yet.
 
+## Pickup and handover
+
+Phase 3B.1, pickup only (no returns yet). After a request is accepted, the item is handed over in one of two ways:
+
+- **In person.** The borrower collects it. The lender confirms with `POST …/handover` and `method: "personal"`.
+- **By someone the borrower authorizes.** The borrower creates a one-time code for a named person (a friend or relative, who needs no account) and gives them the QR. The lender scans it (`…/handover/verify`, which changes nothing), checks the person and the item, then confirms with `method: "authorized"` and the code.
+
+Only the **lender** can confirm, and only once per request. The borrow request stays `accepted`; the handover is a separate record. All endpoints need a token. A user who is not one of the request's two participants gets `404 BORROW_REQUEST_NOT_FOUND`; the wrong participant gets `403`.
+
+**Codes.** 32 characters (160 random bits from the server's CSPRNG), shown grouped as `ABCD-EFGH-…` for typing. The QR contains only `neighborshare://pickup?v=1&code=<CODE>`: no names, ids, tokens or locations. The server stores only a SHA-256 hash and returns the code once, when it is created. A code works for its own request only, once, until `expiresAt` (`PICKUP_AUTHORIZATION_TTL_HOURS`, default 24). Codes travel only in request bodies, never in URLs, and are never logged. Lowercase, dashes, spaces and the full QR text are all accepted.
+
+### `GET /api/v1/borrow-requests/:id/handover`
+
+`200 { "data": { "handover": HandoverState } }`:
+
+```json
+{
+  "borrowRequestId": "…",
+  "requestStatus": "accepted",
+  "status": "pending",
+  "handover": null,
+  "authorizations": [
+    {
+      "id": "…", "borrowRequestId": "…", "operation": "pickup", "status": "active",
+      "recipientName": "Ali Khan", "recipientPhone": "03001234567", "note": "My brother",
+      "expiresAt": "…", "createdAt": "…", "revokedAt": null, "redeemedAt": null
+    }
+  ],
+  "activeAuthorization": { "…": "the active one above, or null" }
+}
+```
+
+Authorization `status` is `active`, `redeemed`, `revoked` or `expired`; expiry is derived from `expiresAt` on every read. Once completed (`status: "completed"`), `handover` is:
+
+```json
+{
+  "id": "…", "method": "authorized", "authorizationId": "…",
+  "recipientName": "Ali Khan", "recipientPhone": "03001234567",
+  "conditionNotes": "Small scratch on the handle", "confirmedAt": "…",
+  "confirmedBy": { "id": "…", "displayName": "Ahmed" },
+  "photos": [{ "id": "…", "url": "https://…signed…", "contentType": "image/jpeg", "createdAt": "…" }]
+}
+```
+
+Photo URLs are short-lived signed URLs from a private bucket. Storage issues them only to the two participants.
+
+### `POST /api/v1/borrow-requests/:id/pickup-authorizations`
+
+Borrower only. Body (strict): `{ "recipientName": "Ali Khan", "recipientPhone": "0300 1234567", "note": "…", "confirm": true }`. The name is 2–80 characters. The phone is optional: spaces, dashes and brackets are removed, then 7–15 digits are allowed with an optional leading `+`. The note is optional, up to 200 characters. `confirm` must be `true`, which records that the borrower reviewed the details.
+
+`201 { "data": { "authorization": {…}, "code": "ABCD…", "displayCode": "ABCD-EFGH-…", "qrPayload": "neighborshare://pickup?v=1&code=ABCD…" } }`. The code is never returned again.
+
+Errors: `400 VALIDATION_ERROR`, `403` (the lender), `404`, `409 REQUEST_NOT_ACCEPTED`, `409 ALREADY_HANDED_OVER`, `409 ACTIVE_AUTHORIZATION_EXISTS` (one active authorization per request; revoke it first), `429`.
+
+### `POST /api/v1/borrow-requests/:id/pickup-authorizations/:authorizationId/revoke`
+
+Borrower only. `200 { "data": { "authorization": {…, "status": "revoked"} } }`. Errors: `403`, `404`, `409 AUTHORIZATION_NOT_ACTIVE`.
+
+### `POST /api/v1/borrow-requests/:id/handover/verify`
+
+Lender only. Body: `{ "code": "<scanned QR text or typed code>" }`. Changes nothing. `200 { "data": { "authorization": {…} } }`, which shows the lender who may collect the item.
+
+Errors: `400 VALIDATION_ERROR` (not a pickup code), `400 INVALID_PICKUP_CODE` (no such code for this request), `409 AUTHORIZATION_REVOKED`, `409 AUTHORIZATION_ALREADY_USED`, `409 AUTHORIZATION_EXPIRED`, `409 REQUEST_NOT_ACCEPTED`, `409 ALREADY_HANDED_OVER`, `403`, `404`, `429`.
+
+### `POST /api/v1/borrow-requests/:id/handover`
+
+Lender only: the explicit confirmation. Bodies (strict):
+
+- `{ "method": "personal", "conditionNotes": "…", "confirm": true }`
+- `{ "method": "authorized", "code": "…", "conditionNotes": "…", "confirm": true }`
+
+`conditionNotes` is optional, up to 1000 characters.
+
+The database locks the request, rechecks everything, marks the code `redeemed` (for an authorized pickup) and records the handover with the server time, all in one transaction. Concurrent or repeated confirmations get `409 ALREADY_HANDED_OVER`. An in-person confirmation also retires any unused authorization (it becomes `revoked`).
+
+`201 { "data": { "handover": {…} } }`. Errors: the same as verify.
+
+### `POST /api/v1/borrow-requests/:id/handover/photos`
+
+Condition evidence. Raw image body (`Content-Type` `image/jpeg`, `image/png` or `image/webp`, at most 5 MB; the bytes must match the declared type). Only the lender who confirmed may upload, at most 5 photos, within 24 hours of the handover. Upload after confirming. A failed upload never undoes the handover, and the app reports it with a retry option.
+
+`201 { "data": { "photo": {…} } }`. Errors: `409 HANDOVER_NOT_CONFIRMED`, `409 EVIDENCE_LIMIT_REACHED`, `409 EVIDENCE_WINDOW_CLOSED`, `403`, `404`, `415`, `503 STORAGE_NOT_CONFIGURED`.
+
+### Socket.IO: `handover:updated`
+
+`{ "borrowRequestId": "…" }` is sent to both participants' sockets after any stored pickup change: an authorization created or revoked, a handover confirmed, or a photo added. It carries no details; clients reload `GET …/handover`.
+
 ## Activity
 
 ### `GET /api/v1/activity`
@@ -789,6 +877,12 @@ Query: `limit` 1–100, default 50.
 | `request_cancelled` | The borrower withdrew (`cancelledAt`) | Borrower |
 | `message` | Latest message of a conversation; `preview` holds its first 120 characters | Sender |
 | `listing_created`, `listing_archived` | Your listing was created or removed | You |
+| `pickup_authorized` | The borrower authorized someone to collect the item (`recipientName`) | Borrower |
+| `pickup_authorization_revoked` | That authorization was revoked (by the borrower, or retired by an in-person handover) | Borrower or lender |
+| `pickup_authorization_redeemed` | The lender accepted the authorized person's code | Lender |
+| `item_handed_over` | The lender confirmed the handover (`handoverMethod`: `personal` or `authorized`) | Lender |
+
+Every item also has `recipientName` and `handoverMethod` (null except on pickup events). Pickup events come from the handover audit trail of the caller's own requests only.
 
 Listing edits are not included, because `updated_at` also changes for availability and photo changes, so it is not a reliable "edited" event.
 
@@ -813,7 +907,7 @@ Listing edits are not included, because `updated_at` also changes for availabili
 }
 ```
 
-`unavailable` names any source (`borrowRequests`, `conversations`, `listings`) that could not be read this time; the others are still returned. If all of them fail, the response is the first error (usually `503 DATABASE_UNAVAILABLE`). Errors: `401`, `400 VALIDATION_ERROR` (`limit`).
+`unavailable` names any source (`borrowRequests`, `conversations`, `listings`, `handovers`) that could not be read this time; the others are still returned. If all of them fail, the response is the first error (usually `503 DATABASE_UNAVAILABLE`). Errors: `401`, `400 VALIDATION_ERROR` (`limit`).
 
 ## Email confirmation flow
 
@@ -867,6 +961,13 @@ The API has no endpoint for step 2: Supabase handles the link itself. How the mo
 | 409 | `IMAGE_LIMIT_REACHED` | Listing photo upload: already 5 photos |
 | 400 | `INVALID_LISTING` | Listings: a database constraint refused a value |
 | 400 | `INVALID_LOCATION` | Pickup spot: the database refused the coordinates (normally caught first as `VALIDATION_ERROR`) |
+| 400 | `INVALID_PICKUP_CODE` | Handover: no such code for this request |
+| 409 | `REQUEST_NOT_ACCEPTED` | Handover: the request is not accepted |
+| 409 | `ALREADY_HANDED_OVER` | Handover: already recorded for this request |
+| 409 | `ACTIVE_AUTHORIZATION_EXISTS` | Handover: revoke the active authorization first |
+| 409 | `AUTHORIZATION_NOT_ACTIVE` | Handover: nothing to revoke |
+| 409 | `AUTHORIZATION_REVOKED`, `AUTHORIZATION_ALREADY_USED`, `AUTHORIZATION_EXPIRED` | Handover: the code cannot be used |
+| 409 | `HANDOVER_NOT_CONFIRMED`, `EVIDENCE_LIMIT_REACHED`, `EVIDENCE_WINDOW_CLOSED` | Handover photos |
 | 400 | `EMPTY_IMAGE` | Listing photo upload with an empty body |
 | 415 | `UNSUPPORTED_IMAGE_TYPE` | Listing photo upload: not JPEG/PNG/WebP, or content does not match `Content-Type` |
 | 409 | `EMAIL_ALREADY_REGISTERED` | Signup, only if email confirmation is disabled |
@@ -907,6 +1008,9 @@ Limits are per API process. Several instances behind a load balancer need a shar
 | `POST /items` | 20 / hour | Account |
 | `POST /items/:id/images` | 60 / hour | Account |
 | `PUT /items/:id/location` | 60 / hour | Account |
+| `POST /borrow-requests/:id/pickup-authorizations` | 20 / hour | Account |
+| `POST …/handover/verify` and `POST …/handover` (shared) | 30 / 15 min | Account |
+| `POST …/handover/photos` | 30 / hour | Account |
 | `POST /borrow-requests` | 20 / hour | Account |
 | Chat messages (REST and socket together) | 30 / minute | Account |
 | Socket.IO events | 120 / minute | Socket |

@@ -18,6 +18,12 @@ export interface ChatContextValue {
   // Bumped when the server says a conversation has new activity, and after
   // this device sends, so conversation lists reload.
   revision: number;
+  // Bumped when the server says a borrow request's pickup changed (on either
+  // participant's device), so request and activity screens reload.
+  handoverRevision: number;
+  // Same, for this device's own changes (the server does not echo them
+  // reliably when the socket is down).
+  handoverChanged: () => void;
   // Total unread messages, as of the last conversation list load.
   unreadTotal: number;
   listConversations: () => Promise<ConversationPage>;
@@ -74,22 +80,26 @@ export function ChatProvider({ children, services }: { children: ReactNode; serv
   const [revision, setRevision] = useState(0);
   const [unreadTotal, setUnreadTotal] = useState(0);
   const changed = useCallback(() => setRevision((r) => r + 1), []);
+  const [handoverRevision, setHandoverRevision] = useState(0);
+  const handoverChanged = useCallback(() => setHandoverRevision((r) => r + 1), []);
 
   // Connected while signed in, disconnected otherwise.
   useEffect(() => {
     if (!connection) return;
     const offState = connection.onState(setState);
     const offUpdates = connection.onConversationUpdated(changed);
+    const offHandovers = connection.onHandoverUpdated(handoverChanged);
     const sync = () => (sessionManager.current ? connection.start() : connection.stop());
     sync();
     const offSession = sessionManager.subscribe(sync);
     return () => {
       offState();
       offUpdates();
+      offHandovers();
       offSession();
       connection.stop();
     };
-  }, [connection, sessionManager, changed]);
+  }, [connection, sessionManager, changed, handoverChanged]);
 
   const listConversations = useCallback(async () => {
     const page = await sessionManager.authorized((t) => api.listConversations(t, { pageSize: 50 }));
@@ -158,6 +168,8 @@ export function ChatProvider({ children, services }: { children: ReactNode; serv
     () => ({
       connection: state,
       revision,
+      handoverRevision,
+      handoverChanged,
       unreadTotal,
       listConversations,
       openForRequest,
@@ -168,7 +180,7 @@ export function ChatProvider({ children, services }: { children: ReactNode; serv
       subscribe,
       newClientId: newId,
     }),
-    [state, revision, unreadTotal, listConversations, openForRequest, getConversation, loadMessages, send, markRead, subscribe, newId],
+    [state, revision, handoverRevision, handoverChanged, unreadTotal, listConversations, openForRequest, getConversation, loadMessages, send, markRead, subscribe, newId],
   );
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;

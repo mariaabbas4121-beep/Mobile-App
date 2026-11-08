@@ -9,6 +9,7 @@ import { formatIssues } from '../middleware/validate.middleware.js';
 import type { Caller } from '../listings/listing.types.js';
 import type { ChatEvents, ChatService } from '../chat/chat.service.js';
 import type { ChatMessage, Conversation } from '../chat/chat.types.js';
+import type { HandoverEvents } from '../handover/handover.service.js';
 
 // Real-time chat over Socket.IO, attached to the API's own HTTP server (same
 // port, path /socket.io). The event contract is documented in docs/API.md.
@@ -57,6 +58,10 @@ export interface ServerToClientEvents {
   'message:error': (payload: { conversationId: string | null; clientId: string | null; error: AckError }) => void;
   // Content-free hint to the two participants' own sockets: reload the list.
   'conversation:updated': (payload: { conversationId: string }) => void;
+  // Content-free hint to a borrow request's two participants: its pickup
+  // state changed (authorization created/revoked, handover confirmed, photo
+  // added). Clients reload GET /borrow-requests/:id/handover.
+  'handover:updated': (payload: { borrowRequestId: string }) => void;
   // The access token expired; the socket is about to be disconnected.
   // Reconnect with a fresh token.
   'session:expired': () => void;
@@ -78,6 +83,7 @@ export interface ChatSocketDeps {
   gateway: AuthGateway;
   chat: ChatService;
   events: ChatEvents;
+  handoverEvents?: HandoverEvents;
   now?: () => number;
 }
 
@@ -97,7 +103,10 @@ function connectError(code: string, message: string) {
   return Object.assign(new Error(message), { data: { code } });
 }
 
-export function attachChatSocket(httpServer: HttpServer, { config, logger, gateway, chat, events, now = Date.now }: ChatSocketDeps) {
+export function attachChatSocket(
+  httpServer: HttpServer,
+  { config, logger, gateway, chat, events, handoverEvents, now = Date.now }: ChatSocketDeps,
+) {
   const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>(httpServer, {
     serveClient: false,
     // Browsers (Expo web) need CORS; native apps send no Origin header.
@@ -242,12 +251,17 @@ export function attachChatSocket(httpServer: HttpServer, { config, logger, gatew
     io.to(conversationRoom(conversationId)).emit('message:new', { conversationId, message });
     io.to(participantIds.map(userRoom)).emit('conversation:updated', { conversationId });
   });
+  // Every stored handover change. Participants come from the database.
+  const unsubscribeHandovers = handoverEvents?.subscribe(({ borrowRequestId, participantIds }) => {
+    io.to(participantIds.map(userRoom)).emit('handover:updated', { borrowRequestId });
+  });
 
   return {
     io,
     // Disconnects every socket and closes the HTTP server too.
     close(): Promise<void> {
       unsubscribe();
+      unsubscribeHandovers?.();
       return new Promise((resolve) => {
         void io.close(() => resolve());
       });

@@ -189,6 +189,7 @@ describe('GET /activity', () => {
     t.chatRepository.list.mockRejectedValueOnce(down);
     t.borrowRequests.list.mockRejectedValue(down);
     t.listings.search.mockRejectedValueOnce(down);
+    t.handovers.listEvents.mockRejectedValueOnce(down);
     const failed = await activity(asLender);
     expect(failed.status).toBe(503);
     expect(failed.body.code).toBe('DATABASE_UNAVAILABLE');

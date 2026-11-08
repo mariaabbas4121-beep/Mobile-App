@@ -171,6 +171,68 @@ Timings over the LAN address with a throwaway user (warm, cold in brackets): hea
 | Hosted Supabase | **Migration not applied**; nothing about borrow requests was run against the hosted project |
 | Concurrent accepts on a real server | **Not run** (PGlite has one connection; the exclusion constraint is the guarantee) |
 
+### Secure handover and authorized pickup, Phase 3B.1 (2026-11-08)
+
+| Check | Result |
+| --- | --- |
+| Backend type check, build | Clean |
+| `npm test` (unit + database) | **596 / 596 passed**. 39 new tests: 17 database, 21 route and 1 socket. Details follow the table |
+| Frontend type check | Clean |
+| Frontend tests (`npx jest`) | **318 / 318 passed**. 20 new tests, listed after the backend groups |
+| Android bundle (`expo export --platform android`) | Built (6.5 MB Hermes bundle, includes `expo-camera`, `expo-sharing`) |
+| Hosted Supabase | **Not tested.** The migration is not applied |
+| Real devices, camera, QR scanning, share sheet | **Not tested** |
+
+New backend tests:
+
+- **`tests/db/handover.test.ts`** (17), on the real migration:
+  - Only the borrower authorizes, and only for accepted requests.
+  - The code is stored as a hash and audited.
+  - One active authorization at a time; revoking allows a new one.
+  - App roles cannot read or write the tables directly.
+  - Only the lender verifies; verifying changes nothing.
+  - A wrong code, or a code from another request, is invalid.
+  - The correct lender redeems once; replays are refused.
+  - Revoked and expired codes are refused.
+  - Three simultaneous confirmations produce exactly one handover.
+  - Personal pickup works, and the borrower cannot confirm it.
+  - State and history are visible to the participants only.
+  - Evidence: only the confirming lender, at most 5 photos, within 24 hours; files and records readable by the participants only; the bucket is private.
+- **`tests/unit/handover.routes.test.ts`** (21), through the API:
+  - Code format, CSPRNG output and the QR payload.
+  - The code is returned once and only its hash is stored.
+  - Explicit confirmation and strict bodies are required.
+  - Outsider gets 404 and lender 403 when authorizing.
+  - Pending, declined and cancelled requests are refused.
+  - Revoke, then a replacement with a new code.
+  - Scanning does not hand over.
+  - A wrong lender, the borrower or an outsider cannot redeem.
+  - The correct lender confirms once; the borrow request stays accepted.
+  - A code cannot be used for another request.
+  - Revoked and expired codes are refused.
+  - Invalid input is refused without being echoed back.
+  - Four concurrent confirmations give one 201 and three 409s.
+  - Personal pickup works and retires an unused authorization.
+  - Evidence rules hold, including the 24-hour window.
+  - Activity events reach participants only.
+  - Every endpoint needs a token.
+- **`chat.socket.test.ts`** (+1): `handover:updated` reaches both participants, carries no details, and reaches no outsider.
+
+New frontend tests (`__tests__/handover.test.tsx`, 20):
+
+- Code parsing.
+- Borrower details: collect myself (it cannot mark the pickup itself), authorize someone else, an active authorization with revoke, the completed handover with notes and photos, and reload on the socket hint.
+- Lender details: scan and confirm actions; not-accepted requests show none.
+- Authorization: form validation, then review, then explicit confirmation, then the QR and share. A server refusal is shown. The QR can be shown again from this device's copy, or is unavailable (other device, expired, revoked).
+- Scanner:
+  - Camera permission: ask, then Settings.
+  - A valid QR leads to the review, which needs both checks before confirming.
+  - Non-NeighborShare QR codes are refused without a server call.
+  - Expired, revoked, used and wrong codes say "Do not hand over".
+  - A typed code works.
+- Personal confirmation: confirmed before any photo upload. A failed photo is reported and retryable, and a refused confirmation is explained.
+- Activity wording for the pickup events.
+
 ### Discovery and activity polish, Phase 3A.1 (2026-11-04)
 
 | Check | Result |

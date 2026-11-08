@@ -166,6 +166,7 @@ Migrations live in `supabase/migrations/` and are applied with the Supabase CLI 
 | --- | --- |
 | `20261020120000_auth_foundation.sql` | Types, tables, triggers, RLS, grants |
 | `20261020130000_tighten_service_role_grants.sql` | Makes `audit_events` append-only for `service_role` too; blocks `TRUNCATE` |
+| `20261108120000_pickup_handover.sql` | Pickup authorizations (hashed one-time codes), handovers (one per request), handover photos and the private `handover-evidence` bucket, the handover audit trail, and the SECURITY DEFINER functions that check and record them atomically. `borrow_requests` is unchanged. **Not applied to the dev project.** Until it is, the pickup endpoints answer `503 DATABASE_UNAVAILABLE`, and Activity lists `handovers` under `unavailable` |
 | `20261105120000_browse_exclude_owner.sql` | Replaces `search_listings` with one more optional parameter, `p_exclude_owner_id`, for `owner=others` (Browse leaves out the caller's own listings). Function only: no table, column, policy or data change. **Not applied to the dev project.** Until it is, signed-in browsing (`owner=others`, which the app sends from Phase 3A.1) answers `503 DATABASE_UNAVAILABLE`; `owner=me`, item pages and anonymous browsing keep working |
 | `20261104120000_listing_locations.sql` | Pickup spots (private), per-owner privacy offsets, public approximate points and city on listings, nearby and city search in `search_listings`, city backfill. Applied to the dev project (reported by the user, 2026-11-04; not re-checked by Claude) |
 | `20261103120000_chat.sql` | Conversations and messages, the accept trigger, chat functions, RLS. Needs `20261102120000_borrow_requests.sql` first. **Not applied to the dev project.** Until it is, chat endpoints answer `503 DATABASE_UNAVAILABLE` |
@@ -202,6 +203,19 @@ Always read the dry run first and confirm the linked project is the intended one
 - [ ] **Authentication → Rate Limits:** review the email-send limit (raise it on the dev project so the signup tests can run).
 - [ ] Revoke the personal access token when not running migrations, and clear `SUPABASE_DB_PASSWORD` from `.env`.
 - [ ] Use a separate Supabase project for production; never set `INTEGRATION_PROJECT_REF` there.
+
+### Pickup and handover (Phase 3B.1)
+
+- [ ] Apply `20261108120000_pickup_handover.sql` (after `20261105120000_browse_exclude_owner.sql`): `npm.cmd run db:push:dry`, check the pending list, then `npm.cmd run db:push`.
+- [ ] Check in the dashboard that Storage now has a **private** bucket `handover-evidence` (5 MB, JPEG/PNG/WebP).
+- [ ] Optional: `PICKUP_AUTHORIZATION_TTL_HOURS` in `backend/.env` (1–168, default 24).
+
+How it is protected:
+
+- Nobody reads `pickup_authorizations`, `handovers` or `handover_events` directly. Every API role is refused, and all access goes through functions that take the user from `auth.uid()`.
+- Only code hashes are stored.
+- Each write function locks the borrow request row (`FOR UPDATE`) and rechecks the role, request status, code and expiry in the same transaction. Unique constraints back this up: one handover per request, and one active authorization per request.
+- Evidence files live under `<request>/<handover>/` and are readable only by the two participants. Only the confirming lender can write them, within 24 hours.
 
 ### Browse without your own listings (Phase 3A.1)
 

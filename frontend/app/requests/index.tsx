@@ -37,6 +37,7 @@ function RequestCard({
   onAction,
   onOpenListing,
   onOpenChat,
+  onOpenDetails,
 }: {
   request: BorrowRequest;
   busy: CardBusy | null;
@@ -44,6 +45,7 @@ function RequestCard({
   onAction: (action: BorrowAction) => void;
   onOpenListing: () => void;
   onOpenChat: () => void;
+  onOpenDetails: () => void;
 }) {
   const cfg = STATUS[request.status];
   const lending = request.viewerRole === 'lender';
@@ -90,6 +92,19 @@ function RequestCard({
 
       {request.status === 'accepted' ? (
         <Text style={styles.reserved}>These dates are reserved for {lending ? other : 'you'}.</Text>
+      ) : null}
+      {request.status === 'accepted' ? (
+        <TouchableOpacity
+          style={[styles.actionBtn, styles.pickupBtn]}
+          onPress={onOpenDetails}
+          accessibilityRole="button"
+          accessibilityLabel={`Pickup details for ${request.listing.title}`}
+        >
+          <Ionicons name="cube-outline" size={16} color={Colors.greenDark || '#1b5e20'} />
+          <Text style={[styles.actionText, { color: Colors.greenDark || '#1b5e20' }]}>
+            {lending ? 'Pickup: confirm or scan QR' : 'Pickup: collect or authorize someone'}
+          </Text>
+        </TouchableOpacity>
       ) : null}
       {request.status === 'accepted' ? (
         <View style={styles.actions}>
@@ -353,6 +368,7 @@ export default function BorrowRequestsScreen() {
             onAction={(action) => onAction(item, action)}
             onOpenListing={() => router.push(`/item/${item.listing.id}`)}
             onOpenChat={() => void openChat(item)}
+            onOpenDetails={() => router.push(`/requests/${item.id}`)}
           />
         )}
       />
@@ -393,6 +409,7 @@ const styles = StyleSheet.create({
   declineBtn: { borderWidth: 1.5, borderColor: Colors.rose + '66' },
   acceptBtn: { backgroundColor: Colors.sage },
   chatBtn: { backgroundColor: '#1d4ed8' },
+  pickupBtn: { backgroundColor: '#e8f5e9', borderWidth: 1, borderColor: '#a5d6a7', marginTop: Spacing.sm },
   actionText: { fontSize: Typography.sizes.sm, fontWeight: Typography.weights.bold },
   spinner: { marginTop: 60 },
   empty: { alignItems: 'center', paddingTop: 60, paddingHorizontal: Spacing.xl },

@@ -1,5 +1,18 @@
 import { ApiError, type ApiClient } from '../../lib/api/client';
-import type { BorrowRequest, ChatMessage, Conversation, Listing, OnboardingStatus, PhoneVerification, Profile, Session, User } from '../../lib/api/types';
+import type {
+  BorrowRequest,
+  ChatMessage,
+  Conversation,
+  Handover,
+  HandoverState,
+  Listing,
+  OnboardingStatus,
+  PhoneVerification,
+  PickupAuthorization,
+  Profile,
+  Session,
+  User,
+} from '../../lib/api/types';
 import { SessionManager } from '../../lib/auth/sessionManager';
 import { createMemoryTokenStorage, type TokenStorage } from '../../lib/auth/tokenStorage';
 import type { GoogleAuth } from '../../lib/auth/googleAuth';
@@ -116,6 +129,25 @@ export function fakeApi(): FakeApi {
     })),
     markConversationRead: jest.fn(async () => ({ conversation: conversation({ unreadCount: 0 }) })),
     getActivity: jest.fn(async () => ({ items: [], unavailable: [] })),
+    getHandover: jest.fn(async () => ({ handover: handoverState() })),
+    createPickupAuthorization: jest.fn(async (_t: string, _id: string, input: { recipientName: string; recipientPhone?: string | null; note?: string | null }) => ({
+      authorization: pickupAuthorization({ recipientName: input.recipientName, recipientPhone: input.recipientPhone ?? null, note: input.note ?? null }),
+      code: PICKUP_CODE,
+      displayCode: PICKUP_CODE.match(/.{4}/g)!.join('-'),
+      qrPayload: `neighborshare://pickup?v=1&code=${PICKUP_CODE}`,
+    })),
+    revokePickupAuthorization: jest.fn(async () => ({ authorization: pickupAuthorization({ status: 'revoked', revokedAt: '2026-11-10T09:00:00Z' }) })),
+    verifyPickupCode: jest.fn(async () => ({ authorization: pickupAuthorization() })),
+    confirmHandover: jest.fn(async (_t: string, _id: string, c: { method: 'personal' | 'authorized'; conditionNotes?: string | null }) => ({
+      handover: handover(
+        c.method === 'authorized'
+          ? { method: 'authorized', authorizationId: pickupAuthorization().id, recipientName: 'Ali Khan', conditionNotes: c.conditionNotes ?? null }
+          : { conditionNotes: c.conditionNotes ?? null },
+      ),
+    })),
+    uploadHandoverPhoto: jest.fn(async () => ({
+      photo: { id: 'ph-1', url: 'https://storage.test/evidence/1.jpg', contentType: 'image/jpeg', createdAt: '2026-11-12T09:31:00Z' },
+    })),
   };
 }
 
@@ -162,6 +194,47 @@ export const borrowRequest = (overrides: Partial<BorrowRequest> = {}): BorrowReq
   updatedAt: '2026-11-10T08:00:00Z',
   decidedAt: null,
   cancelledAt: null,
+  ...overrides,
+});
+
+// A valid-looking pickup code (32 Crockford base32 characters).
+export const PICKUP_CODE = 'ABCDEFGHJKMNPQRSTVWXYZ0123456789';
+
+export const pickupAuthorization = (overrides: Partial<PickupAuthorization> = {}): PickupAuthorization => ({
+  id: '55555555-5555-4555-8555-555555555555',
+  borrowRequestId: '44444444-4444-4444-8444-444444444444',
+  operation: 'pickup',
+  status: 'active',
+  recipientName: 'Ali Khan',
+  recipientPhone: '03001234567',
+  note: 'My brother',
+  expiresAt: '2026-11-11T08:00:00Z',
+  createdAt: '2026-11-10T08:00:00Z',
+  revokedAt: null,
+  redeemedAt: null,
+  ...overrides,
+});
+
+export const handoverState = (overrides: Partial<HandoverState> = {}): HandoverState => ({
+  borrowRequestId: '44444444-4444-4444-8444-444444444444',
+  requestStatus: 'accepted',
+  status: 'pending',
+  handover: null,
+  authorizations: [],
+  activeAuthorization: null,
+  ...overrides,
+});
+
+export const handover = (overrides: Partial<Handover> = {}): Handover => ({
+  id: '66666666-6666-4666-8666-666666666666',
+  method: 'personal',
+  authorizationId: null,
+  recipientName: null,
+  recipientPhone: null,
+  conditionNotes: null,
+  confirmedAt: '2026-11-12T09:30:00Z',
+  confirmedBy: { id: 'user-2', displayName: 'Ahmed' },
+  photos: [],
   ...overrides,
 });
 
