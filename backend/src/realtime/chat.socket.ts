@@ -62,6 +62,10 @@ export interface ServerToClientEvents {
   // state changed (authorization created/revoked, handover confirmed, photo
   // added). Clients reload GET /borrow-requests/:id/handover.
   'handover:updated': (payload: { borrowRequestId: string }) => void;
+  // The same, for its return or due date (return initiated, return code
+  // created/revoked, receipt confirmed, photo added, extension requested or
+  // decided). Clients reload GET /borrow-requests/:id/return.
+  'return:updated': (payload: { borrowRequestId: string }) => void;
   // The access token expired; the socket is about to be disconnected.
   // Reconnect with a fresh token.
   'session:expired': () => void;
@@ -84,6 +88,7 @@ export interface ChatSocketDeps {
   chat: ChatService;
   events: ChatEvents;
   handoverEvents?: HandoverEvents;
+  returnEvents?: HandoverEvents;
   now?: () => number;
 }
 
@@ -105,7 +110,7 @@ function connectError(code: string, message: string) {
 
 export function attachChatSocket(
   httpServer: HttpServer,
-  { config, logger, gateway, chat, events, handoverEvents, now = Date.now }: ChatSocketDeps,
+  { config, logger, gateway, chat, events, handoverEvents, returnEvents, now = Date.now }: ChatSocketDeps,
 ) {
   const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>(httpServer, {
     serveClient: false,
@@ -255,6 +260,9 @@ export function attachChatSocket(
   const unsubscribeHandovers = handoverEvents?.subscribe(({ borrowRequestId, participantIds }) => {
     io.to(participantIds.map(userRoom)).emit('handover:updated', { borrowRequestId });
   });
+  const unsubscribeReturns = returnEvents?.subscribe(({ borrowRequestId, participantIds }) => {
+    io.to(participantIds.map(userRoom)).emit('return:updated', { borrowRequestId });
+  });
 
   return {
     io,
@@ -262,6 +270,7 @@ export function attachChatSocket(
     close(): Promise<void> {
       unsubscribe();
       unsubscribeHandovers?.();
+      unsubscribeReturns?.();
       return new Promise((resolve) => {
         void io.close(() => resolve());
       });

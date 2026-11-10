@@ -4,6 +4,8 @@
 // not possible, the code is shared as text instead.
 
 export interface PickupShare {
+  // Collecting the item, or bringing it back. Defaults to pickup.
+  operation?: 'pickup' | 'return';
   // PNG of the QR, base64 (react-native-qrcode-svg's toDataURL), if available.
   qrPngBase64: string | null;
   recipientName: string;
@@ -13,7 +15,7 @@ export interface PickupShare {
 }
 
 export const pickupShareMessage = (s: PickupShare) =>
-  `Hi ${s.recipientName}, please collect "${s.itemTitle}" for me on NeighborShare. ` +
+  `Hi ${s.recipientName}, please ${s.operation === 'return' ? 'return' : 'collect'} "${s.itemTitle}" for me on NeighborShare. ` +
   `Show this QR to the owner, or read them this code: ${s.displayCode}. ` +
   `It works once and expires ${new Date(s.expiresAt).toLocaleString()}.`;
 
@@ -30,7 +32,11 @@ export async function sharePickupQr(s: PickupShare): Promise<'image' | 'text'> {
         if (file.exists) file.delete();
         file.create();
         await file.write(s.qrPngBase64, { encoding: 'base64' });
-        await Sharing.shareAsync(file.uri, { mimeType: 'image/png', dialogTitle: `Pickup QR for ${s.recipientName}`, UTI: 'public.png' });
+        await Sharing.shareAsync(file.uri, {
+          mimeType: 'image/png',
+          dialogTitle: `${s.operation === 'return' ? 'Return' : 'Pickup'} QR for ${s.recipientName}`,
+          UTI: 'public.png',
+        });
         return 'image';
       }
     } catch {

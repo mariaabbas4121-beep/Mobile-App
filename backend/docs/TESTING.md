@@ -171,6 +171,68 @@ Timings over the LAN address with a throwaway user (warm, cold in brackets): hea
 | Hosted Supabase | **Migration not applied**; nothing about borrow requests was run against the hosted project |
 | Concurrent accepts on a real server | **Not run** (PGlite has one connection; the exclusion constraint is the guarantee) |
 
+### Secure returns and due-date extensions, Phase 3B.2 (2026-11-10)
+
+| Check | Result |
+| --- | --- |
+| Backend type check, build | Clean |
+| `npm test` (unit + database) | **639 / 639 passed** (43 new: 20 database, 22 route, 1 socket). The server-process test's start-up wait went from 30 s to 60 s, because `tsx` compiling the server alongside the parallel suites took longer than 30 s. It passed alone with the old limit; its assertions are unchanged |
+| Frontend type check | Clean |
+| Frontend tests (`npx jest`) | **341 / 341 passed** (23 new). One 3B.1 assertion was narrowed from `/Authorize someone/` to the exact pickup label, because the new return card legitimately offers "Authorize someone else to return it" |
+| Android bundle (`expo export --platform android`) | Built (6.5 MB Hermes bundle) |
+| Hosted Supabase | **Not tested.** The migration is not applied |
+| Real devices, camera, QR, share sheet | **Not tested** |
+
+New backend tests:
+
+- **`tests/db/returns.test.ts`** (20), on the real migration:
+  - Personal and delivery initiation; only the borrower; only after pickup.
+  - App roles cannot read or write the return tables or `end_date` directly.
+  - Return codes are hashed; a replacement revokes the previous code atomically.
+  - The lender cannot authorize; revoke is borrower-only.
+  - Pickup and return codes never work for each other, in either direction and through every function.
+  - Verify changes nothing; confirm records once with the recipient and notes; the borrower cannot confirm.
+  - Invalid, expired, revoked, other-request and used codes are refused.
+  - Personal and delivery receipt need an initiated return and retire an unused code.
+  - Three simultaneous confirmations produce exactly one receipt.
+  - Evidence: only the confirming lender, at most 5, never before confirmation, 24-hour window, participant-only files, private bucket.
+  - Extensions:
+    - A pending request does not move the due date; approval moves it, including in the booking calendar.
+    - A duplicate pending request is refused; rejection leaves the date unchanged.
+    - Invalid dates and the wrong people are refused.
+    - It cannot extend over someone else's booking, at request or at approval.
+    - Overdue follows the approved due date, and the late-request flags are kept.
+    - Not overdue before pickup or after the return.
+    - The due date cannot be changed any other way.
+  - Visibility: state and events for participants only.
+- **`tests/unit/returns.routes.test.ts`** (22) covers the same rules through the API, plus:
+  - Strict bodies and a confirmation flag.
+  - Pickup QR refused at return verify, and return QR refused at pickup verify.
+  - Four concurrent confirmations give one success.
+  - Files over 5 MB get 413; a failed upload leaves the return intact and can be retried.
+  - Overdue days from the server's Pakistan date.
+  - Activity for participants only; every endpoint needs a token.
+- **`chat.socket.test.ts`** (+1): `return:updated` reaches both participants, carries no details, and reaches no outsider.
+
+New frontend tests (`__tests__/returns.test.tsx`, 23):
+
+- Code separation.
+- Borrower: ready-to-return state with the due date; personal return needs the owner (no self-confirm); delivery details; authorize someone else; awaiting-confirmation state with active and expired codes, show again and revoke; return failure does not hide the pickup.
+- Lender: delivery, in-person and QR confirmation entry points; nothing to confirm before the borrower starts; the returned state with notes and photos.
+- Due date:
+  - Server overdue on both sides.
+  - No overdue after an approved extension.
+  - The extension request stepper, a refused request, and a pending request that changes nothing.
+  - Lender approve and decline.
+  - Reload on `return:updated`.
+- Return authorization screen: a return code (not a pickup code), the QR, sharing and revoking.
+- Lender confirmation screen:
+  - A pickup QR is refused; the return QR leads to the checklist and then the receipt.
+  - A typed code works; an expired code says not to accept it.
+  - Delivery receipt with a failed photo reported and then retried.
+  - A repeated confirmation is explained.
+- Activity wording.
+
 ### Secure handover and authorized pickup, Phase 3B.1 (2026-11-08)
 
 | Check | Result |

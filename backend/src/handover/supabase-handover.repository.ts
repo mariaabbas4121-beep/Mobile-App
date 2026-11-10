@@ -23,7 +23,7 @@ export const HANDOVER_EVIDENCE_BUCKET = 'handover-evidence';
 interface AuthorizationRow {
   id: string;
   borrow_request_id: string;
-  operation: 'pickup';
+  operation: 'pickup' | 'return';
   status: PickupAuthorizationStatus;
   recipient_name: string;
   recipient_phone: string | null;

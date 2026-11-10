@@ -49,6 +49,8 @@ const event = (over: Partial<ActivityItem>): ActivityItem => ({
   preview: null,
   recipientName: null,
   handoverMethod: null,
+  returnMethod: null,
+  requestedEndDate: null,
   ...over,
 });
 

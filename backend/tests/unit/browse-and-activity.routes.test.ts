@@ -190,6 +190,7 @@ describe('GET /activity', () => {
     t.borrowRequests.list.mockRejectedValue(down);
     t.listings.search.mockRejectedValueOnce(down);
     t.handovers.listEvents.mockRejectedValueOnce(down);
+    t.returns.listEvents.mockRejectedValueOnce(down);
     const failed = await activity(asLender);
     expect(failed.status).toBe(503);
     expect(failed.body.code).toBe('DATABASE_UNAVAILABLE');

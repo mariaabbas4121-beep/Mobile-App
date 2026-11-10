@@ -96,7 +96,7 @@ export class ChatConnection {
     return () => this.updateListeners.delete(listener);
   }
 
-  // Content-free hint that a borrow request's pickup state changed.
+  // Content-free hint that a borrow request's pickup, return or due date changed.
   onHandoverUpdated(listener: (borrowRequestId: string) => void): () => void {
     this.handoverListeners.add(listener);
     return () => this.handoverListeners.delete(listener);
@@ -160,9 +160,12 @@ export class ChatConnection {
     socket.on('conversation:updated', (payload: { conversationId: string }) => {
       for (const l of this.updateListeners) l(payload.conversationId);
     });
-    socket.on('handover:updated', (payload: { borrowRequestId: string }) => {
-      for (const l of this.handoverListeners) l(payload.borrowRequestId);
-    });
+    // Pickup and return changes both mean "reload this request's state".
+    for (const event of ['handover:updated', 'return:updated']) {
+      socket.on(event, (payload: { borrowRequestId: string }) => {
+        for (const l of this.handoverListeners) l(payload.borrowRequestId);
+      });
+    }
     socket.connect();
   }
 

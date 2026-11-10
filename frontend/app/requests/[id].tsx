@@ -6,7 +6,8 @@ import { Ionicons } from '@expo/vector-icons';
 import Toast from 'react-native-toast-message';
 import { useBorrowRequests } from '../../context/BorrowRequestsContext';
 import { useChat } from '../../context/ChatContext';
-import type { BorrowRequest, HandoverState, PickupAuthorization, PickupAuthorizationStatus } from '../../lib/api/types';
+import type { BorrowRequest, HandoverState, PickupAuthorization, PickupAuthorizationStatus, ReturnState } from '../../lib/api/types';
+import { DueDateCard, ReturnCard } from '../../components/returns/ReturnPanels';
 import { errorMessage } from '../../lib/auth/messages';
 import { formatRange } from '../../lib/borrow/dates';
 import { AUTH_STATUS, when } from '../../lib/handover/format';
@@ -51,10 +52,13 @@ function AuthorizationCard({ a, lending }: { a: PickupAuthorization; lending: bo
 export default function RequestDetailsScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { get, handover: loadHandover, revokePickup, revision } = useBorrowRequests();
+  const { get, handover: loadHandover, returnState: loadReturn, revokePickup, revision } = useBorrowRequests();
   const { openForRequest, handoverRevision } = useChat();
   const [request, setRequest] = useState<BorrowRequest | null>(null);
   const [state, setState] = useState<HandoverState | null>(null);
+  // Loaded on its own: a failure here never hides the pickup.
+  const [returns, setReturns] = useState<ReturnState | null>(null);
+  const [returnsError, setReturnsError] = useState<unknown>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState<unknown>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -68,10 +72,16 @@ export default function RequestDetailsScreen() {
       if (mode === 'refresh') setRefreshing(true);
       try {
         const r = await get(id);
-        const h = r.status === 'accepted' ? await loadHandover(id) : null;
+        const accepted = r.status === 'accepted';
+        const [h, ret] = await Promise.all([
+          accepted ? loadHandover(id) : Promise.resolve(null),
+          accepted ? loadReturn(id).then((x) => ({ ok: x }), (e: unknown) => ({ failed: e })) : Promise.resolve(null),
+        ]);
         if (ticket !== latest.current) return;
         setRequest(r);
         setState(h);
+        setReturns(ret && 'ok' in ret ? ret.ok : null);
+        setReturnsError(ret && 'failed' in ret ? ret.failed : null);
         setStatus('ready');
       } catch (err) {
         if (ticket !== latest.current) return;
@@ -82,7 +92,7 @@ export default function RequestDetailsScreen() {
         if (ticket === latest.current) setRefreshing(false);
       }
     },
-    [get, loadHandover, id],
+    [get, loadHandover, loadReturn, id],
   );
 
   useEffect(() => {
@@ -337,6 +347,17 @@ export default function RequestDetailsScreen() {
             )}
           </View>
         )}
+
+        {request.status === 'accepted' && returns ? (
+          <>
+            <DueDateCard request={request} state={returns} onChanged={() => void load('quiet')} />
+            <ReturnCard request={request} state={returns} onChanged={() => void load('quiet')} />
+          </>
+        ) : request.status === 'accepted' && returnsError ? (
+          <Text style={styles.note} accessibilityRole="alert">
+            Return and due-date details could not be loaded. {errorMessage(returnsError)} Pull down to try again.
+          </Text>
+        ) : null}
 
         {request.status === 'accepted' && past.length > 0 ? (
           <View style={styles.card}>

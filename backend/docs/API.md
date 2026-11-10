@@ -11,6 +11,7 @@ This is the contract the mobile app integrates against. Everything here is imple
 - [Borrow requests](#borrow-requests): [create](#post-apiv1borrow-requests), [lists](#get-apiv1borrow-requestsoutgoing-and-incoming), [get](#get-apiv1borrow-requestsid), [accept · decline · cancel](#post-apiv1borrow-requestsidaccept--decline--cancel), [booked dates](#get-apiv1itemsidbooked-dates)
 - [Chat](#chat): [list](#get-apiv1conversations), [open](#post-apiv1conversations), [get](#get-apiv1conversationsid), [history](#get-apiv1conversationsidmessages), [send](#post-apiv1conversationsidmessages), [mark read](#post-apiv1conversationsidread), [Socket.IO events](#socketio), [two-device test](#testing-chat-with-two-accounts), [limitations](#known-limitations)
 - [Pickup and handover](#pickup-and-handover): [state](#get-apiv1borrow-requestsidhandover), [authorize](#post-apiv1borrow-requestsidpickup-authorizations), [revoke](#post-apiv1borrow-requestsidpickup-authorizationsauthorizationidrevoke), [verify](#post-apiv1borrow-requestsidhandoververify), [confirm](#post-apiv1borrow-requestsidhandover), [photos](#post-apiv1borrow-requestsidhandoverphotos)
+- [Returns and due dates](#returns-and-due-dates): [state](#get-apiv1borrow-requestsidreturn), [start](#post-apiv1borrow-requestsidreturn), [authorize](#post-apiv1borrow-requestsidreturn-authorizations), [verify](#post-apiv1borrow-requestsidreturnverify), [confirm](#post-apiv1borrow-requestsidreturnconfirm), [photos](#post-apiv1borrow-requestsidreturnphotos), [extensions](#post-apiv1borrow-requestsidextensions)
 - [Activity](#activity): [recent activity](#get-apiv1activity)
 - [Email confirmation flow](#email-confirmation-flow)
 - [Error codes](#error-codes)
@@ -861,6 +862,142 @@ Condition evidence. Raw image body (`Content-Type` `image/jpeg`, `image/png` or 
 
 `{ "borrowRequestId": "…" }` is sent to both participants' sockets after any stored pickup change: an authorization created or revoked, a handover confirmed, or a photo added. It carries no details; clients reload `GET …/handover`.
 
+## Returns and due dates
+
+Phase 3B.2. After pickup, the **borrower** starts the return, and only the **lender** can confirm that the item is back. Starting a return, or creating a return code, never completes it.
+
+The borrower can return the item in three ways:
+
+- In person.
+- By delivery or courier. An optional provider, reference number and note can be added. These are information only: there is no live tracking or courier integration.
+- Through someone they authorize with a one-time **return** code. That person needs no account.
+
+The borrow request stays `accepted` throughout. All endpoints need a token. Anyone who is not one of the request's two participants gets `404 BORROW_REQUEST_NOT_FOUND`, and the wrong participant gets `403`.
+
+**Return codes** have the same format and protections as pickup codes: 160 random bits, only a SHA-256 hash stored, shown once, single use, and expiring after `PICKUP_AUTHORIZATION_TTL_HOURS`. They differ in three ways:
+
+- The QR is `neighborshare://return?v=1&code=<CODE>`.
+- A return code never works for a pickup, and a pickup code never works for a return. Return verification refuses a pickup QR, and the database looks codes up by operation as well.
+- Creating a new return code revokes the previous unused one in the same transaction, so at most one is active.
+
+**Overdue** is computed by the server from the current approved due date (inclusive, Pakistan time). An item is overdue when it has been picked up, has not been returned, and today is after the due date. The item is never marked returned automatically, and nothing is charged or sent.
+
+### `GET /api/v1/borrow-requests/:id/return`
+
+`200 { "data": { "return": ReturnState } }`:
+
+```json
+{
+  "borrowRequestId": "…", "requestStatus": "accepted",
+  "status": "awaiting_confirmation",
+  "startDate": "2026-11-12", "dueDate": "2026-11-18", "originalDueDate": "2026-11-14",
+  "today": "2026-11-16", "overdue": false, "daysOverdue": 0,
+  "return": {
+    "id": "…", "method": "delivery",
+    "delivery": { "provider": "TCS", "reference": "TRK-123", "note": null },
+    "initiatedAt": "…", "updatedAt": "…",
+    "authorizationId": null, "recipientName": null, "recipientPhone": null,
+    "confirmedAt": null, "confirmedBy": null, "conditionNotes": null, "photos": []
+  },
+  "authorizations": [{ "…": "return authorizations (operation \"return\"), newest first" }],
+  "activeAuthorization": null,
+  "extensions": [{
+    "id": "…", "status": "approved", "previousEndDate": "2026-11-14", "requestedEndDate": "2026-11-18",
+    "reason": "Trip got longer", "requestedWhileOverdue": false, "overdueAtDecision": false,
+    "createdAt": "…", "decidedAt": "…"
+  }],
+  "pendingExtension": null
+}
+```
+
+`status` is one of:
+
+- `not_picked_up`
+- `ready`: picked up, return not started.
+- `awaiting_confirmation`: started by the borrower, not yet confirmed by the lender.
+- `returned`
+
+Once returned, `return` holds `confirmedAt`, `confirmedBy`, the actual `method`, the recipient (for an authorized return), the notes, and the photos as signed URLs from the private `return-evidence` bucket.
+
+### `POST /api/v1/borrow-requests/:id/return`
+
+Borrower only, after pickup. Body (strict), one of:
+
+- `{ "method": "personal", "confirm": true }`
+- `{ "method": "delivery", "deliveryProvider": "…", "deliveryReference": "…", "deliveryNote": "…", "confirm": true }`: all three fields are optional, at most 80, 80 and 300 characters.
+
+Repeating it changes the method. Choosing either method revokes an unused return code. Returns `200` with the `ReturnState`.
+
+Errors: `409 NOT_PICKED_UP`, `409 ALREADY_RETURNED`, `409 REQUEST_NOT_ACCEPTED`, `403`, `404`.
+
+### `POST /api/v1/borrow-requests/:id/return-authorizations`
+
+Borrower only, after pickup. The body is the same as for a pickup authorization: `{ "recipientName", "recipientPhone"?, "note"?, "confirm": true }`. It also sets the return method to `authorized`, and revokes any earlier unused return code.
+
+`201 { "data": { "authorization": {…, "operation": "return"}, "code", "displayCode", "qrPayload": "neighborshare://return?v=1&code=…" } }`. The code is never returned again.
+
+### `POST /api/v1/borrow-requests/:id/return-authorizations/:authorizationId/revoke`
+
+Borrower only. Returns `200` with the revoked authorization.
+
+Errors: `409 AUTHORIZATION_NOT_ACTIVE`, `403`, `404` (also for a pickup authorization's id).
+
+### `POST /api/v1/borrow-requests/:id/return/verify`
+
+Lender only. Body: `{ "code": "<scanned return QR or typed code>" }`. Changes nothing. `200 { "data": { "authorization": {…} } }`.
+
+Errors:
+
+- `400 VALIDATION_ERROR`: not a return code, or a pickup QR.
+- `400 INVALID_RETURN_CODE`: no such return code for this request. A pickup code gets this too.
+- `409 AUTHORIZATION_REVOKED`, `409 AUTHORIZATION_EXPIRED`, `409 AUTHORIZATION_ALREADY_USED`
+- `409 ALREADY_RETURNED`, `409 NOT_PICKED_UP`, `403`, `404`, `429`.
+
+### `POST /api/v1/borrow-requests/:id/return/confirm`
+
+Lender only: the explicit confirmation of receipt, recorded once. The borrower must have started the return (`409 RETURN_NOT_INITIATED` otherwise). Bodies (strict):
+
+- `{ "method": "personal", "conditionNotes"?, "confirm": true }`
+- `{ "method": "delivery", "conditionNotes"?, "confirm": true }`
+- `{ "method": "authorized", "code": "…", "conditionNotes"?, "confirm": true }`
+
+The database locks the request and rechecks everything in one transaction:
+
+- An authorized return marks the code `redeemed`.
+- A personal or delivery return revokes any unused code.
+- Confirming again, or concurrently, gets `409 ALREADY_RETURNED`.
+
+`201 { "data": { "return": {…} } }`. Errors: as for verify.
+
+### `POST /api/v1/borrow-requests/:id/return/photos`
+
+Condition evidence after receipt. Raw image body (JPEG, PNG or WebP, at most 5 MB). Only the lender who confirmed can upload, at most 5 photos, within 24 hours. Each upload gets a new server-chosen name and never overwrites another. A failed upload never undoes the confirmed return; the app reports it and offers a retry.
+
+Errors: `409 RETURN_NOT_CONFIRMED`, `409 EVIDENCE_LIMIT_REACHED`, `409 EVIDENCE_WINDOW_CLOSED`, `403`, `404`, `413`, `415`, `503 STORAGE_NOT_CONFIGURED`.
+
+### `POST /api/v1/borrow-requests/:id/extensions`
+
+Borrower only, while the request is accepted and not returned. Body (strict): `{ "requestedEndDate": "YYYY-MM-DD", "reason"?: "…" }`, with the reason at most 300 characters. The new date must meet four rules:
+
+- It is later than the current due date.
+- It is not in the past.
+- It is at most 30 days after the start, counting both days, as for a new request.
+- It does not cover days another accepted request has booked.
+
+Only one extension request can be pending at a time. A pending request does **not** change the due date. `201 { "data": { "extension": {…} } }`.
+
+Errors: `400 INVALID_EXTENSION_DATE`, `409 DATES_UNAVAILABLE`, `409 EXTENSION_PENDING`, `409 ALREADY_RETURNED`, `409 REQUEST_NOT_ACCEPTED`, `403`, `404`, `429`.
+
+### `POST /api/v1/borrow-requests/:id/extensions/:extensionId/approve` and `…/reject`
+
+Lender only. Approval moves the due date (`borrow_requests.end_date`), so the booking calendar and the no-overlap rule cover the extra days. Rejection changes nothing. The extension record keeps the previous date, the requested date, the decision time, the deciding user, and whether the item was overdue when it was requested and when it was decided.
+
+Errors: `409 EXTENSION_ALREADY_DECIDED`, `409 DATES_UNAVAILABLE` (someone else booked the days in the meantime), `404 EXTENSION_NOT_FOUND`, `403`, `404`.
+
+### Socket.IO: `return:updated`
+
+`{ "borrowRequestId": "…" }` is sent to both participants' sockets after any stored return or due-date change. It carries no details; clients reload `GET …/return`.
+
 ## Activity
 
 ### `GET /api/v1/activity`
@@ -882,7 +1019,14 @@ Query: `limit` 1–100, default 50.
 | `pickup_authorization_redeemed` | The lender accepted the authorized person's code | Lender |
 | `item_handed_over` | The lender confirmed the handover (`handoverMethod`: `personal` or `authorized`) | Lender |
 
-Every item also has `recipientName` and `handoverMethod` (null except on pickup events). Pickup events come from the handover audit trail of the caller's own requests only.
+| `return_initiated` | The borrower started the return or changed its method (`returnMethod`) | Borrower |
+| `return_authorized`, `return_authorization_revoked` | A return code was created or revoked (`recipientName`) | Borrower (or lender, when receipt retired it) |
+| `return_authorization_redeemed` | The lender accepted the authorized person's return code | Lender |
+| `item_returned` | The lender confirmed receipt (`returnMethod`) | Lender |
+| `extension_requested` | The borrower asked for a later due date (`requestedEndDate`) | Borrower |
+| `extension_approved`, `extension_rejected` | The lender decided | Lender |
+
+Every item also has `recipientName`, `handoverMethod`, `returnMethod` and `requestedEndDate`. Each is null except on the events that use it. Pickup events come from the handover audit trail of the caller's own requests only.
 
 Listing edits are not included, because `updated_at` also changes for availability and photo changes, so it is not a reliable "edited" event.
 
@@ -907,7 +1051,7 @@ Listing edits are not included, because `updated_at` also changes for availabili
 }
 ```
 
-`unavailable` names any source (`borrowRequests`, `conversations`, `listings`, `handovers`) that could not be read this time; the others are still returned. If all of them fail, the response is the first error (usually `503 DATABASE_UNAVAILABLE`). Errors: `401`, `400 VALIDATION_ERROR` (`limit`).
+`unavailable` names any source (`borrowRequests`, `conversations`, `listings`, `handovers`, `returns`) that could not be read this time; the others are still returned. If all of them fail, the response is the first error (usually `503 DATABASE_UNAVAILABLE`). Errors: `401`, `400 VALIDATION_ERROR` (`limit`).
 
 ## Email confirmation flow
 
@@ -968,6 +1112,11 @@ The API has no endpoint for step 2: Supabase handles the link itself. How the mo
 | 409 | `AUTHORIZATION_NOT_ACTIVE` | Handover: nothing to revoke |
 | 409 | `AUTHORIZATION_REVOKED`, `AUTHORIZATION_ALREADY_USED`, `AUTHORIZATION_EXPIRED` | Handover: the code cannot be used |
 | 409 | `HANDOVER_NOT_CONFIRMED`, `EVIDENCE_LIMIT_REACHED`, `EVIDENCE_WINDOW_CLOSED` | Handover photos |
+| 400 | `INVALID_RETURN_CODE` | Return: no such return code for this request |
+| 409 | `NOT_PICKED_UP`, `RETURN_NOT_INITIATED`, `ALREADY_RETURNED`, `RETURN_NOT_CONFIRMED` | Return lifecycle |
+| 400 | `INVALID_EXTENSION_DATE` | Extension: date not allowed |
+| 409 | `EXTENSION_PENDING`, `EXTENSION_ALREADY_DECIDED` | Extensions |
+| 404 | `EXTENSION_NOT_FOUND` | Extensions |
 | 400 | `EMPTY_IMAGE` | Listing photo upload with an empty body |
 | 415 | `UNSUPPORTED_IMAGE_TYPE` | Listing photo upload: not JPEG/PNG/WebP, or content does not match `Content-Type` |
 | 409 | `EMAIL_ALREADY_REGISTERED` | Signup, only if email confirmation is disabled |
@@ -1011,6 +1160,10 @@ Limits are per API process. Several instances behind a load balancer need a shar
 | `POST /borrow-requests/:id/pickup-authorizations` | 20 / hour | Account |
 | `POST …/handover/verify` and `POST …/handover` (shared) | 30 / 15 min | Account |
 | `POST …/handover/photos` | 30 / hour | Account |
+| `POST …/return-authorizations` | 20 / hour | Account (separate counter) |
+| `POST …/return/verify` and `POST …/return/confirm` (shared) | 30 / 15 min | Account (separate counter) |
+| `POST …/return/photos` | 30 / hour | Account (separate counter) |
+| `POST …/extensions` | 10 / hour | Account |
 | `POST /borrow-requests` | 20 / hour | Account |
 | Chat messages (REST and socket together) | 30 / minute | Account |
 | Socket.IO events | 120 / minute | Socket |

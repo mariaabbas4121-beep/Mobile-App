@@ -13,7 +13,8 @@ export type HandoverMethod = (typeof HANDOVER_METHODS)[number];
 export interface PickupAuthorization {
   id: string;
   borrowRequestId: string;
-  operation: 'pickup';
+  // A code only ever works for its own operation.
+  operation: 'pickup' | 'return';
   // 'expired' is derived from expiresAt, whether or not it is stored yet.
   status: PickupAuthorizationStatus;
   recipientName: string;

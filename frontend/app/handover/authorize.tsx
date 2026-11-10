@@ -10,7 +10,7 @@ import { useChat } from '../../context/ChatContext';
 import type { BorrowRequest, PickupAuthorization } from '../../lib/api/types';
 import { errorMessage } from '../../lib/auth/messages';
 import { AUTH_STATUS, when } from '../../lib/handover/format';
-import { formatPickupCode } from '../../lib/handover/pickupCode';
+import { formatPickupCode, qrPayloadFor } from '../../lib/handover/pickupCode';
 import { sharePickupQr } from '../../lib/handover/share';
 import { Colors, Radii, Shadows, Spacing, Typography } from '../../utils/theme';
 
@@ -28,15 +28,26 @@ type Step =
   | { kind: 'unavailable'; authorization: PickupAuthorization | null }
   | { kind: 'error'; error: unknown };
 
-const qrPayload = (code: string) => `neighborshare://pickup?v=1&code=${code}`;
-
-// Borrower: authorize someone else to collect the item with a one-time QR.
-// With `authorizationId`, shows the QR of an existing authorization again
-// (only on the device that created it).
+// Borrower: authorize someone else to collect (kind=pickup, the default) or
+// return (kind=return) the item with a one-time QR. With `authorizationId`,
+// shows the QR of an existing authorization again (only on the device that
+// created it). The two kinds use separate codes that never work for each other.
 export default function AuthorizePickupScreen() {
   const router = useRouter();
-  const { requestId, authorizationId } = useLocalSearchParams<{ requestId: string; authorizationId?: string }>();
-  const { get, handover, authorizePickup, revokePickup, storedPickupCode } = useBorrowRequests();
+  const { requestId, authorizationId, kind } = useLocalSearchParams<{ requestId: string; authorizationId?: string; kind?: string }>();
+  const operation = kind === 'return' ? 'return' : 'pickup';
+  const isReturn = operation === 'return';
+  const verb = isReturn ? 'return' : 'collect';
+  const {
+    get,
+    handover,
+    returnState,
+    authorizePickup,
+    revokePickup,
+    authorizeReturn,
+    revokeReturn,
+    storedPickupCode,
+  } = useBorrowRequests();
   const { handoverChanged } = useChat();
   const [request, setRequest] = useState<BorrowRequest | null>(null);
   const [step, setStep] = useState<Step>({ kind: 'loading' });
@@ -55,14 +66,14 @@ export default function AuthorizePickupScreen() {
         setStep({ kind: 'form' });
         return;
       }
-      const state = await handover(requestId);
+      const state = isReturn ? await returnState(requestId) : await handover(requestId);
       const a = state.authorizations.find((x) => x.id === authorizationId) ?? null;
       const code = a?.status === 'active' ? await storedPickupCode(a.id) : null;
       setStep(a && code ? { kind: 'qr', authorization: a, code } : { kind: 'unavailable', authorization: a });
     } catch (err) {
       setStep({ kind: 'error', error: err });
     }
-  }, [get, handover, storedPickupCode, requestId, authorizationId]);
+  }, [get, handover, returnState, storedPickupCode, requestId, authorizationId, isReturn]);
 
   useEffect(() => {
     void load();
@@ -76,7 +87,7 @@ export default function AuthorizePickupScreen() {
     setBusy(true);
     setSubmitError(null);
     try {
-      const created = await authorizePickup(requestId, {
+      const created = await (isReturn ? authorizeReturn : authorizePickup)(requestId, {
         recipientName: name.trim(),
         recipientPhone: cleanPhone || null,
         note: note.trim() || null,
@@ -102,6 +113,7 @@ export default function AuthorizePickupScreen() {
     });
     try {
       await sharePickupQr({
+        operation,
         qrPngBase64: png,
         recipientName: authorization.recipientName,
         itemTitle: request?.listing.title ?? 'the item',
@@ -114,7 +126,7 @@ export default function AuthorizePickupScreen() {
   };
 
   const revoke = (authorization: PickupAuthorization) =>
-    Alert.alert(`Revoke ${authorization.recipientName}’s pickup?`, 'The QR stops working at once.', [
+    Alert.alert(`Revoke ${authorization.recipientName}’s ${isReturn ? 'return' : 'pickup'}?`, 'The QR stops working at once.', [
       { text: 'Keep it', style: 'cancel' },
       {
         text: 'Revoke',
@@ -122,7 +134,7 @@ export default function AuthorizePickupScreen() {
         onPress: async () => {
           setBusy(true);
           try {
-            await revokePickup(requestId, authorization.id);
+            await (isReturn ? revokeReturn : revokePickup)(requestId, authorization.id);
             handoverChanged();
             Toast.show({ type: 'success', text1: 'Authorization revoked' });
             router.back();
@@ -142,7 +154,7 @@ export default function AuthorizePickupScreen() {
           <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} accessibilityRole="button" accessibilityLabel="Close">
             <Ionicons name="close" size={20} color={Colors.navy} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Authorize pickup</Text>
+          <Text style={styles.headerTitle}>{isReturn ? 'Authorize return' : 'Authorize pickup'}</Text>
           <View style={{ width: 40 }} />
         </View>
       </SafeAreaView>
@@ -165,7 +177,7 @@ export default function AuthorizePickupScreen() {
   } else if (step.kind === 'form') {
     content = (
       <View style={styles.card}>
-        <Text style={styles.title}>Who will collect {request?.listing.title}?</Text>
+        <Text style={styles.title}>Who will {verb} {request?.listing.title}?</Text>
         <Text style={styles.meta}>They do not need NeighborShare. They show a one-time QR to {request?.lender.displayName ?? 'the owner'}.</Text>
         <Text style={styles.label}>Their name (required)</Text>
         <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="e.g. Ali Khan" maxLength={80} accessibilityLabel="Authorized person's name" />
@@ -192,6 +204,9 @@ export default function AuthorizePickupScreen() {
           accessibilityLabel="Note for the owner"
         />
         <Text style={styles.small}>Only you and the owner see these details. No ID numbers are needed.</Text>
+        {isReturn ? (
+          <Text style={styles.small}>Creating a new return QR cancels any earlier unused one.</Text>
+        ) : null}
         <TouchableOpacity
           style={[styles.primaryBtn, !(nameOk && phoneOk) && styles.disabled]}
           disabled={!(nameOk && phoneOk)}
@@ -210,11 +225,11 @@ export default function AuthorizePickupScreen() {
         <Text style={styles.title}>Confirm authorization</Text>
         <Text style={styles.meta}>
           You are allowing <Text style={styles.strong}>{name.trim()}</Text>
-          {cleanPhone ? ` (${cleanPhone})` : ''} to collect <Text style={styles.strong}>{request?.listing.title}</Text> on your behalf.
+          {cleanPhone ? ` (${cleanPhone})` : ''} to {verb} <Text style={styles.strong}>{request?.listing.title}</Text> on your behalf.
         </Text>
         {note.trim() ? <Text style={styles.meta}>Note: {note.trim()}</Text> : null}
         <Text style={styles.note}>
-          Anyone holding the QR can collect the item, once, until it expires. Share it only with {name.trim()}. You can revoke it while it is unused.
+          Anyone holding the QR can {verb} the item, once, until it expires.{isReturn ? ' The owner still checks the item and confirms they received it.' : ''} Share it only with {name.trim()}. You can revoke it while it is unused.
         </Text>
         {submitError ? <Text style={styles.error} accessibilityRole="alert">{submitError}</Text> : null}
         <TouchableOpacity
@@ -237,14 +252,14 @@ export default function AuthorizePickupScreen() {
     content = (
       <View style={styles.card}>
         <View style={styles.rowBetween}>
-          <Text style={styles.title}>{authorization.recipientName} can collect it</Text>
+          <Text style={styles.title}>{authorization.recipientName} can {verb} it</Text>
           <View style={[styles.chip, { backgroundColor: AUTH_STATUS[authorization.status].bg }]}>
             <Text style={[styles.chipText, { color: AUTH_STATUS[authorization.status].color }]}>{AUTH_STATUS[authorization.status].label}</Text>
           </View>
         </View>
         <Text style={styles.meta}>Valid once, until {when(authorization.expiresAt)}.</Text>
         <View style={styles.qrBox} accessibilityLabel="Pickup QR code">
-          <QRCode value={qrPayload(code)} size={220} getRef={(c: unknown) => (qrRef.current = c as typeof qrRef.current)} />
+          <QRCode value={qrPayloadFor(operation, code)} size={220} getRef={(c: unknown) => (qrRef.current = c as typeof qrRef.current)} />
         </View>
         <Text style={styles.small}>Can’t scan? The owner can type this code:</Text>
         <Text style={styles.code} selectable accessibilityLabel="Pickup code">
@@ -278,7 +293,7 @@ export default function AuthorizePickupScreen() {
             : a.status === 'active'
               ? 'For security the code is shown only on the device that created it. Revoke it and create a new one to share again.'
               : a.status === 'redeemed'
-                ? 'It was used to collect the item.'
+                ? `It was used to ${verb} the item.`
                 : 'It can no longer be used. You can authorize someone again from the request.'}
         </Text>
         {a?.status === 'active' ? (

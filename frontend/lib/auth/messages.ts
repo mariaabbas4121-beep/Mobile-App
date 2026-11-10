@@ -111,17 +111,35 @@ export function errorMessage(err: unknown): string {
     case 'INVALID_PICKUP_CODE':
       return 'This is not a valid pickup code for this item.';
     case 'AUTHORIZATION_REVOKED':
-      return 'The borrower revoked this pickup authorization. Do not hand over the item.';
+      return 'The borrower revoked this authorization.';
     case 'AUTHORIZATION_ALREADY_USED':
-      return 'This pickup code has already been used.';
+      return 'This code has already been used.';
     case 'AUTHORIZATION_EXPIRED':
-      return 'This pickup code has expired. Ask the borrower for a new one.';
+      return 'This code has expired. Ask the borrower for a new one.';
     case 'HANDOVER_NOT_CONFIRMED':
       return 'Confirm the handover before adding photos.';
     case 'EVIDENCE_LIMIT_REACHED':
       return 'At most 5 condition photos can be added.';
     case 'EVIDENCE_WINDOW_CLOSED':
       return 'Condition photos can only be added within 24 hours of the handover.';
+    case 'NOT_PICKED_UP':
+      return 'The item has not been picked up yet.';
+    case 'RETURN_NOT_INITIATED':
+      return 'The borrower has not started the return yet.';
+    case 'ALREADY_RETURNED':
+      return 'This item has already been returned.';
+    case 'INVALID_RETURN_CODE':
+      return 'This is not a valid return code for this item.';
+    case 'RETURN_NOT_CONFIRMED':
+      return 'Confirm the return before adding photos.';
+    case 'EXTENSION_NOT_FOUND':
+      return 'This extension request no longer exists.';
+    case 'EXTENSION_PENDING':
+      return 'You already asked for more time. Wait for the owner to answer.';
+    case 'INVALID_EXTENSION_DATE':
+      return 'Choose a date after the current due date, not in the past, and at most 30 days after the start.';
+    case 'EXTENSION_ALREADY_DECIDED':
+      return 'This extension request has already been answered.';
     case 'CONVERSATION_NOT_FOUND':
       return 'This conversation is not available.';
     case 'CHAT_NOT_AVAILABLE':

@@ -3,6 +3,9 @@ import type {
   BorrowRequest,
   ChatMessage,
   Conversation,
+  DueDateExtension,
+  ItemReturn,
+  ReturnState,
   Handover,
   HandoverState,
   Listing,
@@ -148,6 +151,48 @@ export function fakeApi(): FakeApi {
     uploadHandoverPhoto: jest.fn(async () => ({
       photo: { id: 'ph-1', url: 'https://storage.test/evidence/1.jpg', contentType: 'image/jpeg', createdAt: '2026-11-12T09:31:00Z' },
     })),
+    getReturn: jest.fn(async () => ({ return: returnState() })),
+    initiateReturn: jest.fn(async (_t: string, _id: string, input: { method: 'personal' | 'delivery' }) => ({
+      return: returnState({ status: 'awaiting_confirmation', return: itemReturn({ method: input.method }) }),
+    })),
+    createReturnAuthorization: jest.fn(async (_t: string, _id: string, input: { recipientName: string; recipientPhone?: string | null; note?: string | null }) => ({
+      authorization: pickupAuthorization({
+        id: '99999999-9999-4999-8999-999999999999',
+        operation: 'return',
+        recipientName: input.recipientName,
+        recipientPhone: input.recipientPhone ?? null,
+        note: input.note ?? null,
+      }),
+      code: PICKUP_CODE,
+      displayCode: PICKUP_CODE.match(/.{4}/g)!.join('-'),
+      qrPayload: `neighborshare://return?v=1&code=${PICKUP_CODE}`,
+    })),
+    revokeReturnAuthorization: jest.fn(async () => ({
+      authorization: pickupAuthorization({ operation: 'return', status: 'revoked', revokedAt: '2026-11-14T09:00:00Z' }),
+    })),
+    verifyReturnCode: jest.fn(async () => ({ authorization: pickupAuthorization({ operation: 'return', recipientName: 'Bilal' }) })),
+    confirmReturn: jest.fn(async (_t: string, _id: string, c: { method: 'personal' | 'delivery' | 'authorized'; conditionNotes?: string | null }) => ({
+      return: itemReturn({
+        method: c.method,
+        recipientName: c.method === 'authorized' ? 'Bilal' : null,
+        confirmedAt: '2026-11-14T10:00:00Z',
+        confirmedBy: { id: 'user-2', displayName: 'Ahmed' },
+        conditionNotes: c.conditionNotes ?? null,
+      }),
+    })),
+    uploadReturnPhoto: jest.fn(async () => ({
+      photo: { id: 'rp-1', url: 'https://storage.test/return/1.jpg', contentType: 'image/jpeg', createdAt: '2026-11-14T10:01:00Z' },
+    })),
+    requestExtension: jest.fn(async (_t: string, _id: string, input: { requestedEndDate: string; reason?: string | null }) => ({
+      extension: extension({ requestedEndDate: input.requestedEndDate, reason: input.reason ?? null }),
+    })),
+    decideExtension: jest.fn(async (_t: string, _id: string, _ext: string, decision: 'approve' | 'reject') => ({
+      extension: extension({
+        status: decision === 'approve' ? 'approved' : 'rejected',
+        decidedAt: '2026-11-13T09:00:00Z',
+        overdueAtDecision: false,
+      }),
+    })),
   };
 }
 
@@ -235,6 +280,53 @@ export const handover = (overrides: Partial<Handover> = {}): Handover => ({
   confirmedAt: '2026-11-12T09:30:00Z',
   confirmedBy: { id: 'user-2', displayName: 'Ahmed' },
   photos: [],
+  ...overrides,
+});
+
+export const returnState = (overrides: Partial<ReturnState> = {}): ReturnState => ({
+  borrowRequestId: '44444444-4444-4444-8444-444444444444',
+  requestStatus: 'accepted',
+  status: 'ready',
+  startDate: '2026-11-12',
+  dueDate: '2026-11-14',
+  originalDueDate: '2026-11-14',
+  today: '2026-11-13',
+  overdue: false,
+  daysOverdue: 0,
+  return: null,
+  authorizations: [],
+  activeAuthorization: null,
+  extensions: [],
+  pendingExtension: null,
+  ...overrides,
+});
+
+export const itemReturn = (overrides: Partial<ItemReturn> = {}): ItemReturn => ({
+  id: '77777777-7777-4777-8777-777777777777',
+  method: 'personal',
+  delivery: null,
+  initiatedAt: '2026-11-14T08:00:00Z',
+  updatedAt: '2026-11-14T08:00:00Z',
+  authorizationId: null,
+  recipientName: null,
+  recipientPhone: null,
+  confirmedAt: null,
+  confirmedBy: null,
+  conditionNotes: null,
+  photos: [],
+  ...overrides,
+});
+
+export const extension = (overrides: Partial<DueDateExtension> = {}): DueDateExtension => ({
+  id: '88888888-8888-4888-8888-888888888888',
+  status: 'pending',
+  previousEndDate: '2026-11-14',
+  requestedEndDate: '2026-11-17',
+  reason: 'Trip got longer',
+  requestedWhileOverdue: false,
+  overdueAtDecision: null,
+  createdAt: '2026-11-13T08:00:00Z',
+  decidedAt: null,
   ...overrides,
 });
 

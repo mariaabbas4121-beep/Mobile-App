@@ -48,11 +48,20 @@ export function normalizePickupCode(input: string): string | null {
   return CODE.test(s) ? s : null;
 }
 
-// Also takes the full QR text.
-export function codeFromScan(input: string): string | null {
+// Return codes use the same format under their own route, so a scanner can
+// tell them apart. The database keeps the two strictly separate as well.
+export const RETURN_QR_PREFIX = 'neighborshare://return';
+export type CodeOperation = 'pickup' | 'return';
+const PREFIXES: Record<CodeOperation, string> = { pickup: PICKUP_QR_PREFIX, return: RETURN_QR_PREFIX };
+
+// Also takes the full QR text. A QR for the other operation is refused.
+export function codeFromScan(input: string, operation: CodeOperation = 'pickup'): string | null {
   const text = input.trim();
-  if (text.toLowerCase().startsWith(`${PICKUP_QR_PREFIX}?`)) {
-    const params = new URLSearchParams(text.slice(PICKUP_QR_PREFIX.length + 1));
+  const lower = text.toLowerCase();
+  for (const [op, prefix] of Object.entries(PREFIXES)) {
+    if (!lower.startsWith(`${prefix}?`)) continue;
+    if (op !== operation) return null;
+    const params = new URLSearchParams(text.slice(prefix.length + 1));
     if (params.get('v') !== String(PICKUP_QR_VERSION)) return null;
     return normalizePickupCode(params.get('code') ?? '');
   }
@@ -62,6 +71,7 @@ export function codeFromScan(input: string): string | null {
 export const hashPickupCode = (code: string) => createHash('sha256').update(code, 'utf8').digest('hex');
 
 export const pickupQrPayload = (code: string) => `${PICKUP_QR_PREFIX}?v=${PICKUP_QR_VERSION}&code=${code}`;
+export const returnQrPayload = (code: string) => `${RETURN_QR_PREFIX}?v=${PICKUP_QR_VERSION}&code=${code}`;
 
 // "ABCD-EFGH-..." for reading aloud or typing.
 export const formatPickupCode = (code: string) => code.match(/.{1,4}/g)!.join('-');

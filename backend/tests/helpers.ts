@@ -28,6 +28,9 @@ import { DEFAULT_RATE_LIMITS } from '../src/middleware/rate-limit.middleware.js'
 import type { HandoverEvent, HandoverMethod, HandoverRepository, PickupAuthorization } from '../src/handover/handover.types.js';
 import { handoverError } from '../src/handover/supabase-handover.repository.js';
 import { createHandoverEvents } from '../src/handover/handover.service.js';
+import type { DeliveryDetails, DueDateExtension, ItemReturn, ReturnEvent, ReturnMethod, ReturnRepository } from '../src/returns/return.types.js';
+import { daysOverdue, returnError, returnStatus } from '../src/returns/supabase-return.repository.js';
+import { addDays, todayInPakistan } from '../src/borrow/dates.js';
 
 // Fake, syntactically valid configuration for unit tests. It points at an
 // unroutable host and contains no real key.
@@ -730,6 +733,371 @@ export function memoryHandovers(listings: ReturnType<typeof memoryListings>, bor
   return repo;
 }
 
+// --- Return fakes ----------------------------------------------------------
+// In-memory stand-in with the rules of 20261110120000_returns_extensions.sql:
+// participants only; the borrower initiates, authorizes and asks for more
+// time; the lender verifies, confirms receipt and decides; after pickup and
+// before the return only; return codes kept apart from pickup codes; a new
+// code replaces the old one; one receipt; evidence by the confirming lender
+// within 24 hours (at most 5); only an approved extension moves the due date;
+// overdue from the approved due date and Pakistan's today. Checks and writes
+// run without an await in between, so each operation is atomic here.
+export function memoryReturns(
+  listings: ReturnType<typeof memoryListings>,
+  borrowRequests: ReturnType<typeof memoryBorrowRequests>,
+  handovers: ReturnType<typeof memoryHandovers>,
+  now: () => number = Date.now,
+) {
+  interface AuthRow {
+    id: string;
+    requestId: string;
+    recipientName: string;
+    recipientPhone: string | null;
+    note: string | null;
+    tokenHash: string;
+    status: 'active' | 'redeemed' | 'revoked' | 'expired';
+    expiresAt: number;
+    createdAt: number;
+    revokedAt: number | null;
+    redeemedAt: number | null;
+  }
+  interface ReturnRow {
+    id: string;
+    requestId: string;
+    method: ReturnMethod;
+    delivery: DeliveryDetails | null;
+    initiatedAt: number;
+    updatedAt: number;
+    authorizationId: string | null;
+    recipientName: string | null;
+    recipientPhone: string | null;
+    confirmedBy: string | null;
+    confirmedAt: number | null;
+    conditionNotes: string | null;
+    photos: { id: string; path: string; contentType: string; createdAt: number }[];
+  }
+  interface ExtensionRow {
+    id: string;
+    requestId: string;
+    previousEndDate: string;
+    requestedEndDate: string;
+    reason: string | null;
+    status: 'pending' | 'approved' | 'rejected';
+    requestedWhileOverdue: boolean;
+    overdueAtDecision: boolean | null;
+    decidedBy: string | null;
+    createdAt: number;
+    decidedAt: number | null;
+  }
+  const authorizations = new Map<string, AuthRow>();
+  const returns = new Map<string, ReturnRow>();
+  const extensions = new Map<string, ExtensionRow>();
+  const events: { id: number; requestId: string; authorizationId: string | null; extensionId: string | null; actorId: string; kind: ReturnEvent['kind']; at: number }[] =
+    [];
+  let seq = 0;
+  const id = (group: string) => `00000000-0000-4000-${group}-${String(++seq).padStart(12, '0')}`;
+  let offset = 0;
+  let tick = 0;
+  // Strictly increasing, so ordering by time is stable.
+  const clock = () => now() + offset + ++tick;
+  const today = () => todayInPakistan(now() + offset);
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const fail = (code: string): never => {
+    throw returnError(code)!;
+  };
+  const statusOf = (a: AuthRow) => (a.status === 'active' && a.expiresAt <= now() + offset ? 'expired' : a.status);
+  const toAuth = (a: AuthRow): PickupAuthorization => ({
+    id: a.id,
+    borrowRequestId: a.requestId,
+    operation: 'return',
+    status: statusOf(a),
+    recipientName: a.recipientName,
+    recipientPhone: a.recipientPhone,
+    note: a.note,
+    expiresAt: iso(a.expiresAt),
+    createdAt: iso(a.createdAt),
+    revokedAt: a.revokedAt === null ? null : iso(a.revokedAt),
+    redeemedAt: a.redeemedAt === null ? null : iso(a.redeemedAt),
+  });
+  const toExt = (e: ExtensionRow): DueDateExtension => ({
+    id: e.id,
+    status: e.status,
+    previousEndDate: e.previousEndDate,
+    requestedEndDate: e.requestedEndDate,
+    reason: e.reason,
+    requestedWhileOverdue: e.requestedWhileOverdue,
+    overdueAtDecision: e.overdueAtDecision,
+    createdAt: iso(e.createdAt),
+    decidedAt: e.decidedAt === null ? null : iso(e.decidedAt),
+  });
+  const event = (requestId: string, actorId: string, kind: ReturnEvent['kind'], ids: { authorizationId?: string | null; extensionId?: string | null } = {}) =>
+    events.push({ id: events.length + 1, requestId, actorId, kind, authorizationId: ids.authorizationId ?? null, extensionId: ids.extensionId ?? null, at: clock() });
+
+  const participant = (caller: Caller, requestId: string) => {
+    const r = borrowRequests.rows.get(requestId);
+    if (!r || (r.borrowerId !== caller.userId && r.lenderId !== caller.userId)) return fail('NSH01');
+    return r;
+  };
+  const returned = (requestId: string) => Boolean(returns.get(requestId)?.confirmedAt);
+  const overdue = (requestId: string) => {
+    const r = borrowRequests.rows.get(requestId)!;
+    return r.status === 'accepted' && handovers.handovers.has(requestId) && !returned(requestId) && today() > r.endDate;
+  };
+  // Like return_request_for().
+  const requestFor = (caller: Caller, requestId: string, role: 'borrower' | 'lender') => {
+    const r = participant(caller, requestId);
+    if ((role === 'borrower' ? r.borrowerId : r.lenderId) !== caller.userId) fail('42501');
+    if (r.status !== 'accepted') fail('NSH03');
+    if (!handovers.handovers.has(requestId)) fail('NSR01');
+    if (returned(requestId)) fail('NSR03');
+    return r;
+  };
+  const retire = (requestId: string, actorId: string) => {
+    for (const a of authorizations.values()) {
+      if (a.requestId !== requestId || a.status !== 'active') continue;
+      if (statusOf(a) === 'expired') a.status = 'expired';
+      else {
+        Object.assign(a, { status: 'revoked', revokedAt: clock() });
+        event(requestId, actorId, 'return_authorization_revoked', { authorizationId: a.id });
+      }
+    }
+  };
+  const upsert = (requestId: string, borrowerId: string, method: ReturnMethod, delivery: DeliveryDetails | null) => {
+    const existing = returns.get(requestId);
+    const t = clock();
+    if (existing) Object.assign(existing, { method, delivery, updatedAt: t });
+    else {
+      returns.set(requestId, {
+        id: id('b200'),
+        requestId,
+        method,
+        delivery,
+        initiatedAt: t,
+        updatedAt: t,
+        authorizationId: null,
+        recipientName: null,
+        recipientPhone: null,
+        confirmedBy: null,
+        confirmedAt: null,
+        conditionNotes: null,
+        photos: [],
+      });
+    }
+    if (existing?.method !== method) event(requestId, borrowerId, 'return_initiated');
+  };
+  const usable = (requestId: string, tokenHash: string) => {
+    const a = [...authorizations.values()].find((x) => x.tokenHash === tokenHash && x.requestId === requestId);
+    if (!a) return fail('NSH07');
+    const s = statusOf(a);
+    if (s === 'revoked') fail('NSH08');
+    if (s === 'redeemed') fail('NSH09');
+    if (s === 'expired') fail('NSH10');
+    return a;
+  };
+
+  const repo = {
+    authorizations,
+    returns,
+    extensions,
+    events,
+    advance(ms: number) {
+      offset += ms;
+    },
+    getState: vi.fn<ReturnRepository['getState']>(async (caller, requestId) => {
+      const r = borrowRequests.rows.get(requestId);
+      if (!r || (r.borrowerId !== caller.userId && r.lenderId !== caller.userId)) return null;
+      const x = returns.get(requestId);
+      const ret: ItemReturn | null = x
+        ? {
+            id: x.id,
+            method: x.method,
+            delivery: x.delivery,
+            initiatedAt: iso(x.initiatedAt),
+            updatedAt: iso(x.updatedAt),
+            authorizationId: x.authorizationId,
+            recipientName: x.recipientName,
+            recipientPhone: x.recipientPhone,
+            confirmedAt: x.confirmedAt === null ? null : iso(x.confirmedAt),
+            confirmedBy: x.confirmedBy ? { id: x.confirmedBy, displayName: 'Lender' } : null,
+            conditionNotes: x.conditionNotes,
+            photos: x.photos.map((p) => ({ id: p.id, url: `https://storage.test/signed/${p.path}`, contentType: p.contentType, createdAt: iso(p.createdAt) })),
+          }
+        : null;
+      const auths = [...authorizations.values()].filter((a) => a.requestId === requestId).reverse().map(toAuth);
+      const exts = [...extensions.values()].filter((e) => e.requestId === requestId).reverse().map(toExt);
+      const firstApproved = [...extensions.values()].find((e) => e.requestId === requestId && e.status === 'approved');
+      const late = overdue(requestId);
+      return {
+        borrowRequestId: requestId,
+        requestStatus: r.status,
+        status: returnStatus(handovers.handovers.has(requestId), ret),
+        startDate: r.startDate,
+        dueDate: r.endDate,
+        originalDueDate: firstApproved?.previousEndDate ?? r.endDate,
+        today: today(),
+        overdue: late,
+        daysOverdue: daysOverdue(late, today(), r.endDate),
+        return: ret,
+        authorizations: auths,
+        activeAuthorization: auths.find((a) => a.status === 'active') ?? null,
+        extensions: exts,
+        pendingExtension: exts.find((e) => e.status === 'pending') ?? null,
+      };
+    }),
+    initiate: vi.fn<ReturnRepository['initiate']>(async (caller, requestId, input) => {
+      const r = requestFor(caller, requestId, 'borrower');
+      retire(requestId, r.borrowerId);
+      upsert(requestId, r.borrowerId, input.method, input.method === 'delivery' ? input.delivery : null);
+    }),
+    createAuthorization: vi.fn<ReturnRepository['createAuthorization']>(async (caller, requestId, input) => {
+      const r = requestFor(caller, requestId, 'borrower');
+      retire(requestId, r.borrowerId);
+      upsert(requestId, r.borrowerId, 'authorized', null);
+      const t = clock();
+      const a: AuthRow = {
+        id: id('b100'),
+        requestId,
+        recipientName: input.recipientName,
+        recipientPhone: input.recipientPhone,
+        note: input.note,
+        tokenHash: input.tokenHash,
+        status: 'active',
+        createdAt: t,
+        expiresAt: t + input.ttlHours * 3_600_000,
+        revokedAt: null,
+        redeemedAt: null,
+      };
+      authorizations.set(a.id, a);
+      event(requestId, caller.userId, 'return_authorization_created', { authorizationId: a.id });
+      return toAuth(a);
+    }),
+    revokeAuthorization: vi.fn<ReturnRepository['revokeAuthorization']>(async (caller, requestId, authorizationId) => {
+      const r = participant(caller, requestId);
+      if (r.borrowerId !== caller.userId) fail('42501');
+      const a = authorizations.get(authorizationId);
+      if (!a || a.requestId !== requestId) return fail('NSH01');
+      if (statusOf(a) !== 'active') fail('NSR04');
+      Object.assign(a, { status: 'revoked', revokedAt: clock() });
+      event(requestId, caller.userId, 'return_authorization_revoked', { authorizationId: a.id });
+      return toAuth(a);
+    }),
+    verifyCode: vi.fn<ReturnRepository['verifyCode']>(async (caller, requestId, tokenHash) => {
+      requestFor(caller, requestId, 'lender');
+      return toAuth(usable(requestId, tokenHash));
+    }),
+    confirm: vi.fn<ReturnRepository['confirm']>(async (caller, requestId, input) => {
+      requestFor(caller, requestId, 'lender');
+      const x = returns.get(requestId);
+      if (!x) return fail('NSR02');
+      let a: AuthRow | null = null;
+      if (input.method === 'authorized') {
+        a = usable(requestId, input.tokenHash!);
+        Object.assign(a, { status: 'redeemed', redeemedAt: clock() });
+        event(requestId, caller.userId, 'return_authorization_redeemed', { authorizationId: a.id });
+      } else {
+        retire(requestId, caller.userId);
+      }
+      Object.assign(x, {
+        method: input.method,
+        authorizationId: a?.id ?? null,
+        recipientName: a?.recipientName ?? null,
+        recipientPhone: a?.recipientPhone ?? null,
+        confirmedBy: caller.userId,
+        confirmedAt: clock(),
+        conditionNotes: input.conditionNotes,
+      });
+      event(requestId, caller.userId, 'return_confirmed', { authorizationId: a?.id ?? null });
+      return x.id;
+    }),
+    addPhoto: vi.fn<ReturnRepository['addPhoto']>(async (caller, requestId, returnId, file) => {
+      const x = returns.get(requestId);
+      if (!x || x.id !== returnId) return fail('NSH01');
+      if (!x.confirmedAt) fail('NSR02');
+      if (x.confirmedBy !== caller.userId) fail('42501');
+      if (x.confirmedAt! <= now() + offset - 24 * 3_600_000) fail('NSH12');
+      if (x.photos.length >= 5) fail('NSH11');
+      const photo = { id: id('b400'), path: `${requestId}/${returnId}/${seq}.jpg`, contentType: file.contentType, createdAt: clock() };
+      x.photos.push(photo);
+      return { id: photo.id, url: `https://storage.test/signed/${photo.path}`, contentType: photo.contentType, createdAt: iso(photo.createdAt) };
+    }),
+    requestExtension: vi.fn<ReturnRepository['requestExtension']>(async (caller, requestId, input) => {
+      const r = participant(caller, requestId);
+      if (r.borrowerId !== caller.userId) fail('42501');
+      if (r.status !== 'accepted') fail('NSH03');
+      if (returned(requestId)) fail('NSR03');
+      if ([...extensions.values()].some((e) => e.requestId === requestId && e.status === 'pending')) fail('NSE02');
+      const date = input.requestedEndDate;
+      if (date <= r.endDate || date < today() || inclusiveDays(r.startDate, date) > 30) fail('NSE03');
+      const extra = { startDate: addDays(r.endDate, 1), endDate: date };
+      if ([...borrowRequests.rows.values()].some((o) => o.id !== r.id && o.listingId === r.listingId && o.status === 'accepted' && rangesOverlap(o, extra))) {
+        fail('NSE05');
+      }
+      const e: ExtensionRow = {
+        id: id('b300'),
+        requestId,
+        previousEndDate: r.endDate,
+        requestedEndDate: date,
+        reason: input.reason,
+        status: 'pending',
+        requestedWhileOverdue: overdue(requestId),
+        overdueAtDecision: null,
+        decidedBy: null,
+        createdAt: clock(),
+        decidedAt: null,
+      };
+      extensions.set(e.id, e);
+      event(requestId, caller.userId, 'extension_requested', { extensionId: e.id });
+      return toExt(e);
+    }),
+    decideExtension: vi.fn<ReturnRepository['decideExtension']>(async (caller, requestId, extensionId, decision) => {
+      const r = participant(caller, requestId);
+      if (r.lenderId !== caller.userId) fail('42501');
+      const e = extensions.get(extensionId);
+      if (!e || e.requestId !== requestId) return fail('NSE01');
+      if (e.status !== 'pending') fail('NSE04');
+      const late = overdue(requestId);
+      if (decision === 'approved') {
+        if (r.status !== 'accepted') fail('NSH03');
+        if (returned(requestId)) fail('NSR03');
+        if (e.requestedEndDate <= r.endDate) fail('NSE03');
+        const extra = { startDate: addDays(r.endDate, 1), endDate: e.requestedEndDate };
+        if ([...borrowRequests.rows.values()].some((o) => o.id !== r.id && o.listingId === r.listingId && o.status === 'accepted' && rangesOverlap(o, extra))) {
+          fail('NSE05');
+        }
+        r.endDate = e.requestedEndDate;
+      }
+      Object.assign(e, { status: decision, decidedBy: caller.userId, decidedAt: clock(), overdueAtDecision: late });
+      event(requestId, caller.userId, decision === 'approved' ? 'extension_approved' : 'extension_rejected', { extensionId: e.id });
+      return toExt(e);
+    }),
+    listEvents: vi.fn<ReturnRepository['listEvents']>(async (caller, limit) =>
+      events
+        .filter((e) => {
+          const r = borrowRequests.rows.get(e.requestId);
+          return r && (r.borrowerId === caller.userId || r.lenderId === caller.userId);
+        })
+        .reverse()
+        .slice(0, limit)
+        .map((e): ReturnEvent => {
+          const r = borrowRequests.rows.get(e.requestId)!;
+          const l = listings.rows.get(r.listingId)!;
+          return {
+            id: String(e.id),
+            kind: e.kind,
+            createdAt: iso(e.at),
+            actor: { id: e.actorId, displayName: e.actorId === r.lenderId ? 'Lender' : 'Borrower' },
+            recipientName: e.authorizationId ? (authorizations.get(e.authorizationId)?.recipientName ?? null) : null,
+            method: e.kind === 'return_initiated' || e.kind === 'return_confirmed' ? (returns.get(e.requestId)?.method ?? null) : null,
+            requestedEndDate: e.extensionId ? (extensions.get(e.extensionId)?.requestedEndDate ?? null) : null,
+            request: { id: r.id, status: r.status, startDate: r.startDate, endDate: r.endDate, viewerRole: r.borrowerId === caller.userId ? 'borrower' : 'lender' },
+            listing: { id: l.id, title: l.title, imageUrl: null },
+          };
+        }),
+    ),
+  };
+  return repo;
+}
+
 // --- Chat fakes ------------------------------------------------------------
 // In-memory stand-in with the migration's rules: a conversation exists for
 // each accepted request (as the accept trigger creates it), participants
@@ -859,6 +1227,8 @@ export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPoli
   const chatEvents = createChatEvents(silentLogger);
   const handovers = memoryHandovers(listings, borrowRequests);
   const handoverEvents = createHandoverEvents(silentLogger);
+  const returns = memoryReturns(listings, borrowRequests, handovers, overrides.now);
+  const returnEvents = createHandoverEvents(silentLogger);
   const chat = createChatService({
     repository: chatRepository,
     profiles,
@@ -883,8 +1253,10 @@ export function testApp(overrides: { config?: Config; rateLimits?: RateLimitPoli
     chat,
     handovers,
     handoverEvents,
+    returns,
+    returnEvents,
     ...(overrides.now ? { now: overrides.now } : {}),
     ...(overrides.rateLimits ? { rateLimits: overrides.rateLimits } : {}),
   });
-  return { app, gateway, profiles, phoneAuth, phoneStore, listings, borrowRequests, chat, chatRepository, chatEvents, handovers, handoverEvents };
+  return { app, gateway, profiles, phoneAuth, phoneStore, listings, borrowRequests, chat, chatRepository, chatEvents, handovers, handoverEvents, returns, returnEvents };
 }

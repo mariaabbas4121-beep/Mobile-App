@@ -16,6 +16,7 @@ import { DEFAULT_RATE_LIMITS } from './middleware/rate-limit.middleware.js';
 import { attachChatSocket } from './realtime/chat.socket.js';
 import { createSupabaseHandoverRepository } from './handover/supabase-handover.repository.js';
 import { createHandoverEvents } from './handover/handover.service.js';
+import { createSupabaseReturnRepository } from './returns/supabase-return.repository.js';
 
 // Load .env only in the entry point, so tests decide their own environment.
 // Existing process variables take precedence over the file.
@@ -48,6 +49,7 @@ const chat = createChatService({
 });
 // Handover changes are announced to both participants' sockets.
 const handoverEvents = createHandoverEvents(logger);
+const returnEvents = createHandoverEvents(logger);
 const app = createApp({
   config,
   logger,
@@ -68,13 +70,15 @@ const app = createApp({
   // Caller's token only, like the rest; the database functions do the checks.
   handovers: createSupabaseHandoverRepository(supabase, logger),
   handoverEvents,
+  returns: createSupabaseReturnRepository(supabase, logger),
+  returnEvents,
 });
 
 const server = app.listen(config.port, () => {
   logger.info({ port: config.port, env: config.nodeEnv }, 'NeighborShare API listening');
 });
 // Same port as the API, path /socket.io.
-const realtime = attachChatSocket(server, { config, logger, gateway: authGateway, chat, events: chatEvents, handoverEvents });
+const realtime = attachChatSocket(server, { config, logger, gateway: authGateway, chat, events: chatEvents, handoverEvents, returnEvents });
 
 function shutdown(signal: string) {
   logger.info({ signal }, 'shutting down');

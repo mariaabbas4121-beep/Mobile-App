@@ -8,7 +8,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useBorrowRequests, type EvidenceResult } from '../../context/BorrowRequestsContext';
 import { useChat } from '../../context/ChatContext';
 import { isApiError } from '../../lib/api/client';
-import type { BorrowRequest, Handover, PickupAuthorization } from '../../lib/api/types';
+import type { BorrowRequest, Handover, ItemReturn, PickupAuthorization } from '../../lib/api/types';
 import { errorMessage } from '../../lib/auth/messages';
 import { formatRange } from '../../lib/borrow/dates';
 import { when } from '../../lib/handover/format';
@@ -24,19 +24,31 @@ type Step =
   | { kind: 'loading' }
   | { kind: 'scan'; problem: string | null; checking: boolean }
   | { kind: 'review'; authorization: PickupAuthorization | null; code: string | null }
-  | { kind: 'done'; handover: Handover; evidence: EvidenceResult | null }
+  | { kind: 'done'; record: Handover | ItemReturn; evidence: EvidenceResult | null }
   | { kind: 'error'; error: unknown };
 
-// Codes whose screens say "do not hand over".
-const STOP_CODES = new Set(['AUTHORIZATION_REVOKED', 'AUTHORIZATION_EXPIRED', 'AUTHORIZATION_ALREADY_USED', 'INVALID_PICKUP_CODE']);
+// Codes whose screens say the code must not be relied on.
+const STOP_CODES = new Set([
+  'AUTHORIZATION_REVOKED',
+  'AUTHORIZATION_EXPIRED',
+  'AUTHORIZATION_ALREADY_USED',
+  'INVALID_PICKUP_CODE',
+  'INVALID_RETURN_CODE',
+]);
 
-// Lender: confirm the handover. mode=scan: scan (or type) the authorized
-// person's code first; mode=personal: the borrower collects in person.
-// Scanning only checks the code; nothing is recorded until "Confirm handover".
+// Lender: confirm the handover (kind=pickup, the default) or that the item
+// came back (kind=return). mode=scan: scan (or type) the authorized person's
+// code first; mode=personal: the borrower in person; mode=delivery (returns
+// only): it arrived by delivery/courier. Scanning only checks the code;
+// nothing is recorded until the lender confirms.
 export default function ConfirmHandoverScreen() {
   const router = useRouter();
-  const { requestId, mode } = useLocalSearchParams<{ requestId: string; mode: 'scan' | 'personal' }>();
-  const { get, verifyPickupCode, confirmHandover, uploadEvidence } = useBorrowRequests();
+  const { requestId, mode, kind } = useLocalSearchParams<{ requestId: string; mode: 'scan' | 'personal' | 'delivery'; kind?: string }>();
+  const isReturn = kind === 'return';
+  const operation = isReturn ? 'return' : 'pickup';
+  const { get, verifyPickupCode, confirmHandover, uploadEvidence, verifyReturnCode, confirmReturn, uploadReturnEvidence } = useBorrowRequests();
+  const upload = isReturn ? uploadReturnEvidence : uploadEvidence;
+  const stopPrefix = isReturn ? 'Do not accept this code. ' : 'Do not hand over the item. ';
   const { handoverChanged } = useChat();
   const [permission, requestPermission] = useCameraPermissions();
   const [request, setRequest] = useState<BorrowRequest | null>(null);
@@ -57,7 +69,7 @@ export default function ConfirmHandoverScreen() {
       try {
         const r = await get(requestId);
         setRequest(r);
-        setStep(mode === 'personal' ? { kind: 'review', authorization: null, code: null } : { kind: 'scan', problem: null, checking: false });
+        setStep(mode !== 'scan' ? { kind: 'review', authorization: null, code: null } : { kind: 'scan', problem: null, checking: false });
       } catch (err) {
         setStep({ kind: 'error', error: err });
       }
@@ -67,24 +79,24 @@ export default function ConfirmHandoverScreen() {
   const check = useCallback(
     async (raw: string) => {
       if (scanning.current) return;
-      const code = codeFromScan(raw);
+      const code = codeFromScan(raw, operation);
       if (!code) {
-        setStep({ kind: 'scan', problem: 'This is not a NeighborShare pickup QR.', checking: false });
+        setStep({ kind: 'scan', problem: `This is not a NeighborShare ${operation} QR.`, checking: false });
         return;
       }
       scanning.current = true;
       setStep({ kind: 'scan', problem: null, checking: true });
       try {
-        const authorization = await verifyPickupCode(requestId, code);
+        const authorization = await (isReturn ? verifyReturnCode : verifyPickupCode)(requestId, code);
         setStep({ kind: 'review', authorization, code });
       } catch (err) {
         const stop = isApiError(err) && STOP_CODES.has(err.code);
-        setStep({ kind: 'scan', problem: `${stop ? 'Do not hand over the item. ' : ''}${errorMessage(err)}`, checking: false });
+        setStep({ kind: 'scan', problem: `${stop ? stopPrefix : ''}${errorMessage(err)}`, checking: false });
       } finally {
         scanning.current = false;
       }
     },
-    [verifyPickupCode, requestId],
+    [verifyPickupCode, verifyReturnCode, isReturn, operation, stopPrefix, requestId],
   );
 
   const addPhotos = async (source: 'camera' | 'library') => {
@@ -120,17 +132,20 @@ export default function ConfirmHandoverScreen() {
     setBusy(true);
     setConfirmError(null);
     try {
-      const handover = await confirmHandover(
-        requestId,
-        code ? { method: 'authorized', code, conditionNotes: notes.trim() || null } : { method: 'personal', conditionNotes: notes.trim() || null },
-      );
+      const conditionNotes = notes.trim() || null;
+      const record: Handover | ItemReturn = isReturn
+        ? await confirmReturn(
+            requestId,
+            code ? { method: 'authorized', code, conditionNotes } : { method: mode === 'delivery' ? 'delivery' : 'personal', conditionNotes },
+          )
+        : await confirmHandover(requestId, code ? { method: 'authorized', code, conditionNotes } : { method: 'personal', conditionNotes });
       handoverChanged();
       // Recorded. Photos follow; failures are reported, never hidden.
-      const evidence = photos.length > 0 ? await uploadEvidence(requestId, photos) : null;
-      setStep({ kind: 'done', handover, evidence });
+      const evidence = photos.length > 0 ? await upload(requestId, photos) : null;
+      setStep({ kind: 'done', record, evidence });
     } catch (err) {
       if (authorization && isApiError(err) && STOP_CODES.has(err.code)) {
-        setStep({ kind: 'scan', problem: `Do not hand over the item. ${errorMessage(err)}`, checking: false });
+        setStep({ kind: 'scan', problem: `${stopPrefix}${errorMessage(err)}`, checking: false });
       } else {
         setConfirmError(errorMessage(err));
       }
@@ -139,12 +154,12 @@ export default function ConfirmHandoverScreen() {
     }
   };
 
-  const retryPhotos = async (failed: LocalPhoto[], handover: Handover) => {
+  const retryPhotos = async (failed: LocalPhoto[], record: Handover | ItemReturn) => {
     setBusy(true);
-    const evidence = await uploadEvidence(requestId, failed);
+    const evidence = await upload(requestId, failed);
     setStep((s) =>
       s.kind === 'done' && s.evidence
-        ? { kind: 'done', handover, evidence: { saved: [...s.evidence.saved, ...evidence.saved], failed: evidence.failed, firstError: evidence.firstError } }
+        ? { kind: 'done', record, evidence: { saved: [...s.evidence.saved, ...evidence.saved], failed: evidence.failed, firstError: evidence.firstError } }
         : s,
     );
     setBusy(false);
@@ -159,7 +174,9 @@ export default function ConfirmHandoverScreen() {
           <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} accessibilityRole="button" accessibilityLabel="Close">
             <Ionicons name="close" size={20} color={Colors.navy} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>{mode === 'personal' ? 'Confirm pickup' : 'Scan pickup QR'}</Text>
+          <Text style={styles.headerTitle}>
+            {isReturn ? (mode === 'scan' ? 'Scan return QR' : 'Confirm return') : mode === 'personal' ? 'Confirm pickup' : 'Scan pickup QR'}
+          </Text>
           <View style={{ width: 40 }} />
         </View>
       </SafeAreaView>
@@ -179,7 +196,9 @@ export default function ConfirmHandoverScreen() {
   } else if (step.kind === 'scan') {
     content = (
       <View style={styles.card}>
-        <Text style={styles.meta}>Ask the person collecting {request?.listing.title} to show their QR.</Text>
+        <Text style={styles.meta}>
+          Ask the person {isReturn ? 'returning' : 'collecting'} {request?.listing.title} to show their QR.
+        </Text>
         {!permission ? (
           <ActivityIndicator color={GREEN} accessibilityLabel="Checking camera permission" />
         ) : permission.granted ? (
@@ -227,7 +246,7 @@ export default function ConfirmHandoverScreen() {
           placeholder="XXXX-XXXX-XXXX-…"
           autoCapitalize="characters"
           autoCorrect={false}
-          accessibilityLabel="Pickup code"
+          accessibilityLabel={isReturn ? 'Return code' : 'Pickup code'}
         />
         <TouchableOpacity
           style={[styles.secondaryBtn, (step.checking || !typed.trim()) && styles.disabled]}
@@ -246,7 +265,7 @@ export default function ConfirmHandoverScreen() {
     content = (
       <View style={styles.card}>
         {authorization ? (
-          <View style={styles.okBox} accessibilityLabel="Valid pickup code">
+          <View style={styles.okBox} accessibilityLabel={isReturn ? 'Valid return code' : 'Valid pickup code'}>
             <Ionicons name="shield-checkmark" size={20} color={DARK} />
             <View style={{ flex: 1 }}>
               <Text style={styles.body1}>Valid code: {borrower} authorized</Text>
@@ -257,13 +276,19 @@ export default function ConfirmHandoverScreen() {
             </View>
           </View>
         ) : (
-          <Text style={styles.meta}>{borrower} is collecting the item in person.</Text>
+          <Text style={styles.meta}>
+            {isReturn
+              ? mode === 'delivery'
+                ? `${borrower} sent the item back by delivery. Confirm only once you have it.`
+                : `${borrower} is returning the item in person.`
+              : `${borrower} is collecting the item in person.`}
+          </Text>
         )}
         <Text style={styles.label}>Item</Text>
         <Text style={styles.body1}>{request?.listing.title}</Text>
         {request ? <Text style={styles.meta}>{formatRange(request.startDate, request.endDate)}</Text> : null}
 
-        <Text style={styles.label}>Before you hand it over</Text>
+        <Text style={styles.label}>{isReturn ? 'Before you confirm receipt' : 'Before you hand it over'}</Text>
         {authorization ? (
           <Check
             checked={personChecked}
@@ -316,23 +341,38 @@ export default function ConfirmHandoverScreen() {
           disabled={!ready || busy}
           onPress={() => void confirm(authorization, code)}
           accessibilityRole="button"
-          accessibilityLabel="Confirm handover"
+          accessibilityLabel={isReturn ? 'Confirm receipt' : 'Confirm handover'}
           accessibilityState={{ disabled: !ready || busy }}
         >
           {busy ? <ActivityIndicator size="small" color={Colors.white} /> : null}
-          <Text style={styles.primaryText}>Confirm handover</Text>
+          <Text style={styles.primaryText}>{isReturn ? 'Confirm I received it' : 'Confirm handover'}</Text>
         </TouchableOpacity>
-        <Text style={styles.small}>This records that you handed the item over now. It cannot be undone.</Text>
+        <Text style={styles.small}>
+          {isReturn
+            ? 'This records that you have the item back now. It cannot be undone.'
+            : 'This records that you handed the item over now. It cannot be undone.'}
+        </Text>
       </View>
     );
   } else {
-    const { handover, evidence } = step;
+    const { record, evidence } = step;
+    const title = isReturn ? 'Return recorded' : 'Handover recorded';
+    const who = isReturn
+      ? record.method === 'authorized'
+        ? `Returned by ${record.recipientName}`
+        : record.method === 'delivery'
+          ? 'Received by delivery'
+          : `Returned by ${borrower}`
+      : record.method === 'authorized'
+        ? `Handed to ${record.recipientName}`
+        : `Handed to ${borrower}`;
     content = (
-      <View style={styles.card} accessibilityLabel="Handover recorded">
+      <View style={styles.card} accessibilityLabel={title}>
         <Ionicons name="checkmark-circle" size={44} color={GREEN} style={{ alignSelf: 'center' }} />
-        <Text style={[styles.title, { textAlign: 'center' }]}>Handover recorded</Text>
+        <Text style={[styles.title, { textAlign: 'center' }]}>{title}</Text>
         <Text style={[styles.meta, { textAlign: 'center' }]}>
-          {handover.method === 'authorized' ? `Handed to ${handover.recipientName}` : `Handed to ${borrower}`} · {when(handover.confirmedAt)}
+          {who}
+          {record.confirmedAt ? ` · ${when(record.confirmedAt)}` : ''}
         </Text>
         {evidence ? (
           evidence.failed.length === 0 ? (
@@ -344,11 +384,13 @@ export default function ConfirmHandoverScreen() {
               <Text style={styles.body1}>
                 {evidence.saved.length} of {evidence.saved.length + evidence.failed.length} photos saved. {evidence.failed.length} could not be uploaded.
               </Text>
-              <Text style={styles.meta}>{errorMessage(evidence.firstError)} The handover itself is recorded.</Text>
+              <Text style={styles.meta}>
+                {errorMessage(evidence.firstError)} The {isReturn ? 'return' : 'handover'} itself is recorded.
+              </Text>
               <TouchableOpacity
                 style={[styles.secondaryBtn, busy && styles.disabled]}
                 disabled={busy}
-                onPress={() => void retryPhotos(evidence.failed, handover)}
+                onPress={() => void retryPhotos(evidence.failed, record)}
                 accessibilityRole="button"
                 accessibilityLabel="Retry photo upload"
               >

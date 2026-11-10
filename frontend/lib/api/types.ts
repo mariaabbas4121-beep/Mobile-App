@@ -257,7 +257,8 @@ export type HandoverMethod = 'personal' | 'authorized';
 export interface PickupAuthorization {
   id: string;
   borrowRequestId: string;
-  operation: 'pickup';
+  // A code only ever works for its own operation.
+  operation: 'pickup' | 'return';
   status: PickupAuthorizationStatus;
   recipientName: string;
   recipientPhone: string | null;
@@ -317,6 +318,67 @@ export type HandoverConfirmation =
   | { method: 'personal'; conditionNotes?: string | null }
   | { method: 'authorized'; code: string; conditionNotes?: string | null };
 
+// Returns and due-date extensions (/borrow-requests/:id/return, /extensions).
+// Source: backend/src/returns/return.types.ts. Return authorizations are
+// PickupAuthorization records with operation 'return'.
+export type ReturnMethod = 'personal' | 'authorized' | 'delivery';
+export type ExtensionStatus = 'pending' | 'approved' | 'rejected';
+export type ReturnStatus = 'not_picked_up' | 'ready' | 'awaiting_confirmation' | 'returned';
+
+export interface ItemReturn {
+  id: string;
+  method: ReturnMethod;
+  delivery: { provider: string | null; reference: string | null; note: string | null } | null;
+  initiatedAt: string;
+  updatedAt: string;
+  authorizationId: string | null;
+  recipientName: string | null;
+  recipientPhone: string | null;
+  // Null until the lender confirms receipt.
+  confirmedAt: string | null;
+  confirmedBy: { id: string; displayName: string | null } | null;
+  conditionNotes: string | null;
+  photos: HandoverPhoto[];
+}
+
+export interface DueDateExtension {
+  id: string;
+  status: ExtensionStatus;
+  previousEndDate: string;
+  requestedEndDate: string;
+  reason: string | null;
+  requestedWhileOverdue: boolean;
+  overdueAtDecision: boolean | null;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export interface ReturnState {
+  borrowRequestId: string;
+  requestStatus: BorrowStatus;
+  status: ReturnStatus;
+  startDate: string;
+  // Current (approved) due date, inclusive; overdue is judged by the server.
+  dueDate: string;
+  originalDueDate: string;
+  today: string;
+  overdue: boolean;
+  daysOverdue: number;
+  return: ItemReturn | null;
+  authorizations: PickupAuthorization[];
+  activeAuthorization: PickupAuthorization | null;
+  extensions: DueDateExtension[];
+  pendingExtension: DueDateExtension | null;
+}
+
+export type ReturnInitiation =
+  | { method: 'personal' }
+  | { method: 'delivery'; deliveryProvider?: string | null; deliveryReference?: string | null; deliveryNote?: string | null };
+
+export type ReturnConfirmation =
+  | { method: 'personal' | 'delivery'; conditionNotes?: string | null }
+  | { method: 'authorized'; code: string; conditionNotes?: string | null };
+
 // Activity (/activity). Source: backend/src/activity/activity.ts.
 export type ActivityType =
   | 'request_received'
@@ -330,7 +392,15 @@ export type ActivityType =
   | 'pickup_authorized'
   | 'pickup_authorization_revoked'
   | 'pickup_authorization_redeemed'
-  | 'item_handed_over';
+  | 'item_handed_over'
+  | 'return_initiated'
+  | 'return_authorized'
+  | 'return_authorization_revoked'
+  | 'return_authorization_redeemed'
+  | 'item_returned'
+  | 'extension_requested'
+  | 'extension_approved'
+  | 'extension_rejected';
 
 export interface ActivityItem {
   id: string;
@@ -344,13 +414,17 @@ export interface ActivityItem {
   // Pickup events only.
   recipientName: string | null;
   handoverMethod: HandoverMethod | null;
+  // Return events: how it came (or is coming) back.
+  returnMethod: ReturnMethod | null;
+  // Extension events: the due date asked for.
+  requestedEndDate: string | null;
 }
 
 export interface ActivityFeed {
   // Newest first.
   items: ActivityItem[];
   // Parts the server could not read this time; the rest is still returned.
-  unavailable: ('borrowRequests' | 'conversations' | 'listings' | 'handovers')[];
+  unavailable: ('borrowRequests' | 'conversations' | 'listings' | 'handovers' | 'returns')[];
 }
 
 // Codes the backend documents (backend/docs/API.md#error-codes), plus codes
@@ -429,6 +503,16 @@ export type ApiErrorCode =
   | 'HANDOVER_NOT_CONFIRMED'
   | 'EVIDENCE_LIMIT_REACHED'
   | 'EVIDENCE_WINDOW_CLOSED'
+  // Returns and extensions
+  | 'NOT_PICKED_UP'
+  | 'RETURN_NOT_INITIATED'
+  | 'ALREADY_RETURNED'
+  | 'INVALID_RETURN_CODE'
+  | 'RETURN_NOT_CONFIRMED'
+  | 'EXTENSION_NOT_FOUND'
+  | 'EXTENSION_PENDING'
+  | 'INVALID_EXTENSION_DATE'
+  | 'EXTENSION_ALREADY_DECIDED'
   // Client-side
   | 'NETWORK_ERROR'
   | 'TIMEOUT'

@@ -39,6 +39,8 @@ export interface RateLimitPolicy {
   pickupAuthorizePerUser: LimitRule;
   pickupVerifyPerUser: LimitRule;
   handoverPhotoUploadPerUser: LimitRule;
+  // Returns reuse the pickup rules (own counters); extension requests are capped.
+  extensionRequestPerUser: LimitRule;
 }
 
 const MINUTE = 60_000;
@@ -65,6 +67,7 @@ export const DEFAULT_RATE_LIMITS: RateLimitPolicy = {
   pickupAuthorizePerUser: { windowMs: 60 * MINUTE, limit: 20 },
   pickupVerifyPerUser: { windowMs: 15 * MINUTE, limit: 30 },
   handoverPhotoUploadPerUser: { windowMs: 60 * MINUTE, limit: 30 },
+  extensionRequestPerUser: { windowMs: 60 * MINUTE, limit: 10 },
 };
 
 const hashKey = (prefix: string, value: string) => `${prefix}:${createHash('sha256').update(value).digest('base64url')}`;
@@ -196,6 +199,20 @@ export function createHandoverLimiters(policy: RateLimitPolicy = DEFAULT_RATE_LI
     authorizePerUser: createLimiter({ name: 'pickup-authorize-user', rule: policy.pickupAuthorizePerUser, key: 'user' }),
     verifyPerUser: createLimiter({ name: 'pickup-verify-user', rule: policy.pickupVerifyPerUser, key: 'user' }),
     photoUploadPerUser: createLimiter({ name: 'handover-photo-user', rule: policy.handoverPhotoUploadPerUser, key: 'user' }),
+  };
+}
+
+export interface ReturnLimiters extends HandoverLimiters {
+  extensionPerUser: RequestHandler;
+}
+
+// Same rules as pickup, separate counters, so returns never consume a pickup allowance.
+export function createReturnLimiters(policy: RateLimitPolicy = DEFAULT_RATE_LIMITS): ReturnLimiters {
+  return {
+    authorizePerUser: createLimiter({ name: 'return-authorize-user', rule: policy.pickupAuthorizePerUser, key: 'user' }),
+    verifyPerUser: createLimiter({ name: 'return-verify-user', rule: policy.pickupVerifyPerUser, key: 'user' }),
+    photoUploadPerUser: createLimiter({ name: 'return-photo-user', rule: policy.handoverPhotoUploadPerUser, key: 'user' }),
+    extensionPerUser: createLimiter({ name: 'extension-request-user', rule: policy.extensionRequestPerUser, key: 'user' }),
   };
 }
 

@@ -8,6 +8,11 @@ import type {
   HandoverState,
   PickupAuthorization,
   PickupAuthorizationInput,
+  DueDateExtension,
+  ItemReturn,
+  ReturnConfirmation,
+  ReturnInitiation,
+  ReturnState,
   BorrowRequest,
   BorrowRequestInput,
   BorrowRequestPage,
@@ -361,6 +366,61 @@ export function createApiClient({
       }),
     uploadHandoverPhoto: (accessToken: string, requestId: string, fileUri: string, contentType: ImageUploadType) =>
       upload<{ photo: HandoverPhoto }>(`/borrow-requests/${encodeURIComponent(requestId)}/handover/photos`, fileUri, contentType, accessToken),
+
+    // Returns and due-date extensions. The code travels only in request bodies.
+    getReturn: (accessToken: string, requestId: string) =>
+      request<{ return: ReturnState }>({ method: 'GET', path: `/borrow-requests/${encodeURIComponent(requestId)}/return`, accessToken }),
+    initiateReturn: (accessToken: string, requestId: string, input: ReturnInitiation) =>
+      request<{ return: ReturnState }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/return`,
+        body: { ...input, confirm: true },
+        accessToken,
+      }),
+    createReturnAuthorization: (accessToken: string, requestId: string, input: PickupAuthorizationInput) =>
+      request<CreatedPickupAuthorization>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/return-authorizations`,
+        body: { ...input, confirm: true },
+        accessToken,
+      }),
+    revokeReturnAuthorization: (accessToken: string, requestId: string, authorizationId: string) =>
+      request<{ authorization: PickupAuthorization }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/return-authorizations/${encodeURIComponent(authorizationId)}/revoke`,
+        body: {},
+        accessToken,
+      }),
+    verifyReturnCode: (accessToken: string, requestId: string, code: string) =>
+      request<{ authorization: PickupAuthorization }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/return/verify`,
+        body: { code },
+        accessToken,
+      }),
+    confirmReturn: (accessToken: string, requestId: string, confirmation: ReturnConfirmation) =>
+      request<{ return: ItemReturn }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/return/confirm`,
+        body: { ...confirmation, confirm: true },
+        accessToken,
+      }),
+    uploadReturnPhoto: (accessToken: string, requestId: string, fileUri: string, contentType: ImageUploadType) =>
+      upload<{ photo: HandoverPhoto }>(`/borrow-requests/${encodeURIComponent(requestId)}/return/photos`, fileUri, contentType, accessToken),
+    requestExtension: (accessToken: string, requestId: string, input: { requestedEndDate: string; reason?: string | null }) =>
+      request<{ extension: DueDateExtension }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/extensions`,
+        body: input,
+        accessToken,
+      }),
+    decideExtension: (accessToken: string, requestId: string, extensionId: string, decision: 'approve' | 'reject') =>
+      request<{ extension: DueDateExtension }>({
+        method: 'POST',
+        path: `/borrow-requests/${encodeURIComponent(requestId)}/extensions/${encodeURIComponent(extensionId)}/${decision}`,
+        body: {},
+        accessToken,
+      }),
 
     // The caller's own recent activity, derived on the server from their
     // requests, conversations and listings.

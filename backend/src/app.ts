@@ -19,6 +19,7 @@ import {
   createBorrowLimiters,
   createHandoverLimiters,
   createListingLimiters,
+  createReturnLimiters,
   createPhoneLimiters,
   DEFAULT_RATE_LIMITS,
   type RateLimitPolicy,
@@ -39,6 +40,10 @@ import { handoverRoutes } from './routes/handover.routes.js';
 import type { HandoverRepository } from './handover/handover.types.js';
 import { unconfiguredHandovers } from './handover/supabase-handover.repository.js';
 import { createHandoverEvents, createHandoverService, type HandoverEvents } from './handover/handover.service.js';
+import { returnRoutes } from './routes/return.routes.js';
+import type { ReturnRepository } from './returns/return.types.js';
+import { unconfiguredReturns } from './returns/supabase-return.repository.js';
+import { createReturnService } from './returns/return.service.js';
 
 export interface AppDeps {
   config: Config;
@@ -59,6 +64,10 @@ export interface AppDeps {
   // Shared with the Socket.IO server, which tells both participants when a
   // handover changes.
   handoverEvents?: HandoverEvents;
+  // Absent: the return and extension endpoints answer 503 SERVER_NOT_CONFIGURED.
+  returns?: ReturnRepository;
+  // Announced to both participants as "return:updated".
+  returnEvents?: HandoverEvents;
   // Clock for date rules (tests pin it).
   now?: () => number;
   rateLimits?: RateLimitPolicy;
@@ -75,6 +84,8 @@ export function createApp({
   chat = unconfiguredChatService(profiles, logger),
   handovers = unconfiguredHandovers(),
   handoverEvents = createHandoverEvents(logger),
+  returns = unconfiguredReturns(),
+  returnEvents = createHandoverEvents(logger),
   now = Date.now,
   rateLimits = DEFAULT_RATE_LIMITS,
 }: AppDeps) {
@@ -170,10 +181,23 @@ export function createApp({
       limiters: createHandoverLimiters(rateLimits),
     }),
   );
+  app.use(
+    '/api/v1/borrow-requests',
+    returnRoutes({
+      gateway: authGateway,
+      returns: createReturnService({
+        repository: returns,
+        borrowRequests,
+        events: returnEvents,
+        authorizationTtlHours: config.handover.authorizationTtlHours,
+      }),
+      limiters: createReturnLimiters(rateLimits),
+    }),
+  );
   app.use('/api/v1/conversations', conversationRoutes({ gateway: authGateway, chat }));
   app.use(
     '/api/v1/activity',
-    activityRoutes({ gateway: authGateway, activity: createActivityService({ listings, borrowRequests, chat, handovers, logger }) }),
+    activityRoutes({ gateway: authGateway, activity: createActivityService({ listings, borrowRequests, chat, handovers, returns, logger }) }),
   );
   app.use('/api/v1/items', listingRoutes({ gateway: authGateway, profiles, listings, limiters: createListingLimiters(rateLimits) }));
 

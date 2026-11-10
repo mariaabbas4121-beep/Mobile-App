@@ -180,7 +180,8 @@ describe('request details: borrower', () => {
     expect(screen.getByText('Scratch on the handle')).toBeTruthy();
     expect(screen.getAllByLabelText('Condition photo')).toHaveLength(1);
     expect(screen.getByLabelText('Authorization for Ali Khan, Used')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /Authorize someone/ })).toBeNull();
+    // The pickup options are gone (the return card has its own).
+    expect(screen.queryByRole('button', { name: 'Authorize someone else to collect it' })).toBeNull();
   });
 
   test('reloads when the server says the pickup changed on the other device', async () => {
@@ -458,6 +459,8 @@ describe('activity wording for pickups', () => {
     preview: null,
     recipientName: 'Ali Khan',
     handoverMethod: null,
+    returnMethod: null,
+    requestedEndDate: null,
   };
   const sara = { id: 'user-1', displayName: 'Sara', isYou: false };
   const me = { id: 'user-2', displayName: 'Ahmed', isYou: true };

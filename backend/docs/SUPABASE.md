@@ -166,6 +166,7 @@ Migrations live in `supabase/migrations/` and are applied with the Supabase CLI 
 | --- | --- |
 | `20261020120000_auth_foundation.sql` | Types, tables, triggers, RLS, grants |
 | `20261020130000_tighten_service_role_grants.sql` | Makes `audit_events` append-only for `service_role` too; blocks `TRUNCATE` |
+| `20261110120000_returns_extensions.sql` | Returns (`item_returns`), return photos and the private `return-evidence` bucket, due-date extensions, the return audit trail, and the functions that check and record them atomically. Return codes live in `pickup_authorizations` with `operation = 'return'`. Changes to existing objects: the `operation` check now allows `return`; there is one active authorization per request *and operation*; the pickup lookup, revoke and state functions match `pickup` only; and the `borrow_requests` update trigger lets `decide_extension()` move `end_date` later. **Not applied to the dev project.** Until it is, the return and extension endpoints answer `503 DATABASE_UNAVAILABLE`, the app shows "Return and due-date details could not be loaded" under the pickup, and Activity lists `returns` under `unavailable` |
 | `20261108120000_pickup_handover.sql` | Pickup authorizations (hashed one-time codes), handovers (one per request), handover photos and the private `handover-evidence` bucket, the handover audit trail, and the SECURITY DEFINER functions that check and record them atomically. `borrow_requests` is unchanged. **Not applied to the dev project.** Until it is, the pickup endpoints answer `503 DATABASE_UNAVAILABLE`, and Activity lists `handovers` under `unavailable` |
 | `20261105120000_browse_exclude_owner.sql` | Replaces `search_listings` with one more optional parameter, `p_exclude_owner_id`, for `owner=others` (Browse leaves out the caller's own listings). Function only: no table, column, policy or data change. **Not applied to the dev project.** Until it is, signed-in browsing (`owner=others`, which the app sends from Phase 3A.1) answers `503 DATABASE_UNAVAILABLE`; `owner=me`, item pages and anonymous browsing keep working |
 | `20261104120000_listing_locations.sql` | Pickup spots (private), per-owner privacy offsets, public approximate points and city on listings, nearby and city search in `search_listings`, city backfill. Applied to the dev project (reported by the user, 2026-11-04; not re-checked by Claude) |
@@ -203,6 +204,14 @@ Always read the dry run first and confirm the linked project is the intended one
 - [ ] **Authentication → Rate Limits:** review the email-send limit (raise it on the dev project so the signup tests can run).
 - [ ] Revoke the personal access token when not running migrations, and clear `SUPABASE_DB_PASSWORD` from `.env`.
 - [ ] Use a separate Supabase project for production; never set `INTEGRATION_PROJECT_REF` there.
+
+### Returns and due-date extensions (Phase 3B.2)
+
+- [ ] Apply `20261110120000_returns_extensions.sql`. It needs `20261108120000_pickup_handover.sql` first. Run `npm.cmd run db:push:dry`, check the pending list, then `npm.cmd run db:push`.
+- [ ] Check in the dashboard that Storage has a **private** bucket `return-evidence` (5 MB, JPEG/PNG/WebP).
+- [ ] No new environment variable. Return codes use `PICKUP_AUTHORIZATION_TTL_HOURS`.
+
+Why the borrow-request trigger changes: an approved extension has to move `borrow_requests.end_date`. That column feeds the booking calendar (`listing_booked_ranges`) and the no-overlap exclusion constraint, so other users cannot book the extra days. The trigger still refuses every other change. `end_date` may move only later, only on an accepted request, and only while `decide_extension()` has set its transaction-local flag. App users cannot update `end_date` at all, because they have no column grant. The 30-day check and the exclusion constraint still apply to the new date.
 
 ### Pickup and handover (Phase 3B.1)
 

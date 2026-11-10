@@ -4,10 +4,12 @@ import type { Conversation } from '../chat/chat.types.js';
 import type { Logger } from '../lib/logger.js';
 import type { Caller, Listing, ListingRepository } from '../listings/listing.types.js';
 import type { HandoverEvent, HandoverMethod, HandoverRepository } from '../handover/handover.types.js';
+import type { ReturnEvent, ReturnMethod, ReturnRepository } from '../returns/return.types.js';
 
 // The caller's recent activity, derived from records they can already read:
 // their borrow requests (both sides), their conversations, their own
-// listings and their requests' pickup/handover audit trail. Every source is queried with the caller's token, so Row-Level
+// listings and their requests' pickup, return and extension audit trails.
+// Every source is queried with the caller's token, so Row-Level
 // Security decides what is included; nothing is stored and no other user's
 // records can appear. No notification table is involved.
 
@@ -25,10 +27,19 @@ export const ACTIVITY_TYPES = [
   'pickup_authorization_revoked',
   'pickup_authorization_redeemed', // the lender accepted that person's code
   'item_handed_over', // the lender confirmed the handover
+  // Returns and due dates (Phase 3B.2), from the return audit trail.
+  'return_initiated', // the borrower started the return (returnMethod)
+  'return_authorized', // the borrower named someone to return the item
+  'return_authorization_revoked',
+  'return_authorization_redeemed', // the lender accepted that person's code
+  'item_returned', // the lender confirmed receipt
+  'extension_requested', // requestedEndDate
+  'extension_approved',
+  'extension_rejected',
 ] as const;
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
 
-export const ACTIVITY_SOURCES = ['borrowRequests', 'conversations', 'listings', 'handovers'] as const;
+export const ACTIVITY_SOURCES = ['borrowRequests', 'conversations', 'listings', 'handovers', 'returns'] as const;
 export type ActivitySource = (typeof ACTIVITY_SOURCES)[number];
 
 export interface ActivityItem {
@@ -47,6 +58,10 @@ export interface ActivityItem {
   // ever see their own requests' events), and how the item was handed over.
   recipientName: string | null;
   handoverMethod: HandoverMethod | null;
+  // Return events: how the item is (or was) coming back.
+  returnMethod: ReturnMethod | null;
+  // Extension events: the due date asked for.
+  requestedEndDate: string | null;
 }
 
 export interface ActivityFeed {
@@ -69,6 +84,8 @@ function requestEvents(r: BorrowRequest, me: string): ActivityItem[] {
     preview: null,
     recipientName: null,
     handoverMethod: null,
+    returnMethod: null,
+    requestedEndDate: null,
   };
   const events: ActivityItem[] = [
     {
@@ -104,6 +121,8 @@ function messageEvent(c: Conversation, me: string): ActivityItem | null {
     preview: m.body.length > ACTIVITY_PREVIEW_LENGTH ? `${m.body.slice(0, ACTIVITY_PREVIEW_LENGTH - 1)}…` : m.body,
     recipientName: null,
     handoverMethod: null,
+    returnMethod: null,
+    requestedEndDate: null,
   };
 }
 
@@ -126,6 +145,36 @@ function handoverEvent(e: HandoverEvent, me: string): ActivityItem {
     preview: null,
     recipientName: e.recipientName,
     handoverMethod: e.method,
+    returnMethod: null,
+    requestedEndDate: null,
+  };
+}
+
+const RETURN_TYPES: Record<ReturnEvent['kind'], ActivityType> = {
+  return_initiated: 'return_initiated',
+  return_authorization_created: 'return_authorized',
+  return_authorization_revoked: 'return_authorization_revoked',
+  return_authorization_redeemed: 'return_authorization_redeemed',
+  return_confirmed: 'item_returned',
+  extension_requested: 'extension_requested',
+  extension_approved: 'extension_approved',
+  extension_rejected: 'extension_rejected',
+};
+
+function returnEvent(e: ReturnEvent, me: string): ActivityItem {
+  return {
+    id: `return:${e.id}`,
+    type: RETURN_TYPES[e.kind],
+    occurredAt: e.createdAt,
+    actor: party(e.actor, me),
+    listing: e.listing,
+    request: e.request,
+    conversationId: null,
+    preview: null,
+    recipientName: e.recipientName,
+    handoverMethod: null,
+    returnMethod: e.method,
+    requestedEndDate: e.requestedEndDate,
   };
 }
 
@@ -140,6 +189,8 @@ function listingEvents(l: Listing, me: string): ActivityItem[] {
     preview: null,
     recipientName: null,
     handoverMethod: null,
+    returnMethod: null,
+    requestedEndDate: null,
   };
   const events: ActivityItem[] = [{ ...base, id: `listing:${l.id}:created`, type: 'listing_created', occurredAt: l.createdAt }];
   if (l.archivedAt) events.push({ ...base, id: `listing:${l.id}:archived`, type: 'listing_archived', occurredAt: l.archivedAt });
@@ -151,10 +202,11 @@ export interface ActivityDeps {
   borrowRequests: BorrowRequestRepository;
   chat: Pick<ChatService, 'list'>;
   handovers: Pick<HandoverRepository, 'listEvents'>;
+  returns: Pick<ReturnRepository, 'listEvents'>;
   logger: Logger;
 }
 
-export function createActivityService({ listings, borrowRequests, chat, handovers, logger }: ActivityDeps) {
+export function createActivityService({ listings, borrowRequests, chat, handovers, returns, logger }: ActivityDeps) {
   return {
     // Newest first. A source that fails is reported in `unavailable`; if all
     // fail, the first error is thrown.
@@ -180,6 +232,7 @@ export function createActivityService({ listings, borrowRequests, chat, handover
             .then(({ items }) => items.filter((l) => l.owner.id === me).flatMap((l) => listingEvents(l, me))),
         ],
         ['handovers', handovers.listEvents(caller, ACTIVITY_SOURCE_WINDOW).then((events) => events.map((e) => handoverEvent(e, me)))],
+        ['returns', returns.listEvents(caller, ACTIVITY_SOURCE_WINDOW).then((events) => events.map((e) => returnEvent(e, me)))],
       ];
 
       const settled = await Promise.allSettled(sources.map(([, p]) => p));

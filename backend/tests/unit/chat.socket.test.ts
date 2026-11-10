@@ -51,6 +51,7 @@ async function start(now?: () => number) {
     chat: t.chat,
     events: t.chatEvents,
     handoverEvents: t.handoverEvents,
+    returnEvents: t.returnEvents,
     ...(now ? { now } : {}),
   });
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -161,6 +162,21 @@ describe('handover hints', () => {
       .set(asBorrower)
       .send({ recipientName: 'Ali Khan', confirm: true });
     expect(created.status).toBe(201);
+    await settle();
+    expect(forBorrower).toEqual([{ borrowRequestId: requestId }]);
+    expect(forLender).toEqual([{ borrowRequestId: requestId }]);
+    expect(forOutsider).toEqual([]);
+  });
+});
+
+describe('return hints', () => {
+  test('both participants hear return:updated, with no details; others hear nothing', async () => {
+    const { requestId } = await acceptedConversation();
+    await t.handovers.confirm({ userId: lender.id, accessToken: VALID_TOKEN }, requestId, { method: 'personal', tokenHash: null, conditionNotes: null });
+    const [b, l, o] = [await connected(OTHER_TOKEN), await connected(VALID_TOKEN), await connected(THIRD_TOKEN)];
+    const [forBorrower, forLender, forOutsider] = [collect(b, 'return:updated'), collect(l, 'return:updated'), collect(o, 'return:updated')];
+    const res = await request(t.app).post(`/api/v1/borrow-requests/${requestId}/return`).set(asBorrower).send({ method: 'personal', confirm: true });
+    expect(res.status).toBe(200);
     await settle();
     expect(forBorrower).toEqual([{ borrowRequestId: requestId }]);
     expect(forLender).toEqual([{ borrowRequestId: requestId }]);

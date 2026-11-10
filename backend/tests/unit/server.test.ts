@@ -61,8 +61,8 @@ describe('server process', () => {
     const port = String(41_000 + Math.floor(Math.random() * 2000));
     const proc = start({ ...validEnv, NODE_ENV: 'development', PORT: port, LOG_LEVEL: 'info' });
     // tsx compiles the whole server on start; with the database tests
-    // running in parallel that can take well over 15 s on a busy machine.
-    await waitFor(() => proc.output().includes('NeighborShare API listening'), 30_000);
+    // running in parallel that has taken over 30 s on a busy machine.
+    await waitFor(() => proc.output().includes('NeighborShare API listening'), 60_000);
 
     const res = await fetch(`http://127.0.0.1:${port}/api/v1/health`);
     expect(res.status).toBe(200);
@@ -75,7 +75,7 @@ describe('server process', () => {
     const refusal = await new Promise<Error & { data?: { code?: string } }>((resolve) => socket.once('connect_error', resolve));
     socket.disconnect();
     expect(refusal.data).toEqual({ code: 'UNAUTHENTICATED' });
-  }, 45_000);
+  }, 90_000);
 
   test('refuses to start with invalid configuration, naming variables but not values', async () => {
     const secretLooking = 'sb_secret_value_that_must_not_be_printed';
@@ -96,5 +96,5 @@ describe('server process', () => {
     expect(out).not.toContain('not-a-url');
     expect(out).not.toContain('sb_se');
     expect(out).not.toMatch(/\bat\s.+:\d+:\d+/); // no stack trace
-  }, 30_000);
+  }, 60_000);
 });

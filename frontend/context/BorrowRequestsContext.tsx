@@ -13,6 +13,12 @@ import type {
   HandoverState,
   PickupAuthorization,
   PickupAuthorizationInput,
+  DueDateExtension,
+  ImageUploadType,
+  ItemReturn,
+  ReturnConfirmation,
+  ReturnInitiation,
+  ReturnState,
 } from '../lib/api/types';
 import type { SessionManager } from '../lib/auth/sessionManager';
 import { secureStorePickupCodes, type PickupCodeStore } from '../lib/handover/codeStore';
@@ -59,6 +65,21 @@ export interface BorrowRequestsContextValue {
   confirmHandover: (requestId: string, confirmation: HandoverConfirmation) => Promise<Handover>;
   // One at a time; never reports a photo as saved unless the server stored it.
   uploadEvidence: (requestId: string, photos: LocalPhoto[]) => Promise<EvidenceResult>;
+
+  // Returns and due dates (Phase 3B.2). The server decides every rule.
+  returnState: (requestId: string) => Promise<ReturnState>;
+  // Borrower: in person or by delivery.
+  initiateReturn: (requestId: string, input: ReturnInitiation) => Promise<ReturnState>;
+  // Borrower: someone else returns it. Replaces an earlier unused return code.
+  authorizeReturn: (requestId: string, input: PickupAuthorizationInput) => Promise<CreatedPickupAuthorization>;
+  revokeReturn: (requestId: string, authorizationId: string) => Promise<PickupAuthorization>;
+  // Lender.
+  verifyReturnCode: (requestId: string, code: string) => Promise<PickupAuthorization>;
+  confirmReturn: (requestId: string, confirmation: ReturnConfirmation) => Promise<ItemReturn>;
+  uploadReturnEvidence: (requestId: string, photos: LocalPhoto[]) => Promise<EvidenceResult>;
+  // Borrower asks; lender decides. Only an approval moves the due date.
+  requestExtension: (requestId: string, input: { requestedEndDate: string; reason?: string | null }) => Promise<DueDateExtension>;
+  decideExtension: (requestId: string, extensionId: string, decision: 'approve' | 'reject') => Promise<DueDateExtension>;
 }
 
 const BorrowRequestsContext = createContext<BorrowRequestsContextValue | null>(null);
@@ -168,14 +189,18 @@ export function BorrowRequestsProvider({ children, services }: { children: React
     [api, sessionManager, changed],
   );
 
-  const uploadEvidence = useCallback(
-    async (requestId: string, photos: LocalPhoto[]): Promise<EvidenceResult> => {
+  // One at a time, so a failure leaves the rest intact and is reported.
+  const uploadAll = useCallback(
+    async (
+      photos: LocalPhoto[],
+      send: (token: string, photo: { uri: string; type: ImageUploadType }) => Promise<{ photo: HandoverPhoto }>,
+    ): Promise<EvidenceResult> => {
       const saved: HandoverPhoto[] = [];
       const failed: LocalPhoto[] = [];
       let firstError: unknown = null;
       for (const photo of photos) {
         try {
-          saved.push((await sessionManager.authorized((t) => api.uploadHandoverPhoto(t, requestId, photo.uri, photo.type))).photo);
+          saved.push((await sessionManager.authorized((t) => send(t, photo))).photo);
         } catch (err) {
           failed.push(photo);
           firstError ??= err;
@@ -183,6 +208,82 @@ export function BorrowRequestsProvider({ children, services }: { children: React
       }
       if (saved.length > 0) changed();
       return { saved, failed, firstError };
+    },
+    [sessionManager, changed],
+  );
+
+  const uploadEvidence = useCallback(
+    (requestId: string, photos: LocalPhoto[]) => uploadAll(photos, (t, p) => api.uploadHandoverPhoto(t, requestId, p.uri, p.type)),
+    [api, uploadAll],
+  );
+
+  const returnState = useCallback(
+    async (requestId: string) => (await sessionManager.authorized((t) => api.getReturn(t, requestId))).return,
+    [api, sessionManager],
+  );
+
+  const initiateReturn = useCallback(
+    async (requestId: string, input: ReturnInitiation) => {
+      const result = await sessionManager.authorized((t) => api.initiateReturn(t, requestId, input));
+      changed();
+      return result.return;
+    },
+    [api, sessionManager, changed],
+  );
+
+  const authorizeReturn = useCallback(
+    async (requestId: string, input: PickupAuthorizationInput) => {
+      const created = await sessionManager.authorized((t) => api.createReturnAuthorization(t, requestId, input));
+      await pickupCodes.save(created.authorization.id, created.code).catch(() => undefined);
+      changed();
+      return created;
+    },
+    [api, sessionManager, pickupCodes, changed],
+  );
+
+  const revokeReturn = useCallback(
+    async (requestId: string, authorizationId: string) => {
+      const { authorization } = await sessionManager.authorized((t) => api.revokeReturnAuthorization(t, requestId, authorizationId));
+      await pickupCodes.remove(authorizationId);
+      changed();
+      return authorization;
+    },
+    [api, sessionManager, pickupCodes, changed],
+  );
+
+  const verifyReturnCode = useCallback(
+    async (requestId: string, code: string) => (await sessionManager.authorized((t) => api.verifyReturnCode(t, requestId, code))).authorization,
+    [api, sessionManager],
+  );
+
+  const confirmReturn = useCallback(
+    async (requestId: string, confirmation: ReturnConfirmation) => {
+      const result = await sessionManager.authorized((t) => api.confirmReturn(t, requestId, confirmation));
+      changed();
+      return result.return;
+    },
+    [api, sessionManager, changed],
+  );
+
+  const uploadReturnEvidence = useCallback(
+    (requestId: string, photos: LocalPhoto[]) => uploadAll(photos, (t, p) => api.uploadReturnPhoto(t, requestId, p.uri, p.type)),
+    [api, uploadAll],
+  );
+
+  const requestExtension = useCallback(
+    async (requestId: string, input: { requestedEndDate: string; reason?: string | null }) => {
+      const { extension } = await sessionManager.authorized((t) => api.requestExtension(t, requestId, input));
+      changed();
+      return extension;
+    },
+    [api, sessionManager, changed],
+  );
+
+  const decideExtension = useCallback(
+    async (requestId: string, extensionId: string, decision: 'approve' | 'reject') => {
+      const { extension } = await sessionManager.authorized((t) => api.decideExtension(t, requestId, extensionId, decision));
+      changed();
+      return extension;
     },
     [api, sessionManager, changed],
   );
@@ -204,6 +305,15 @@ export function BorrowRequestsProvider({ children, services }: { children: React
       verifyPickupCode,
       confirmHandover,
       uploadEvidence,
+      returnState,
+      initiateReturn,
+      authorizeReturn,
+      revokeReturn,
+      verifyReturnCode,
+      confirmReturn,
+      uploadReturnEvidence,
+      requestExtension,
+      decideExtension,
     }),
     [
       revision,
@@ -221,6 +331,15 @@ export function BorrowRequestsProvider({ children, services }: { children: React
       verifyPickupCode,
       confirmHandover,
       uploadEvidence,
+      returnState,
+      initiateReturn,
+      authorizeReturn,
+      revokeReturn,
+      verifyReturnCode,
+      confirmReturn,
+      uploadReturnEvidence,
+      requestExtension,
+      decideExtension,
     ],
   );
 
